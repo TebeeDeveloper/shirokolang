@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+	<meta charset="UTF-8">
+	<title>Shiroko Web Compiler</title>
+	<script src="wasm_exec.js"></script>
+</head>
+<body>
+	<script>
+		const go = new Go();
+		WebAssembly.instantiateStreaming(fetch("shiroko.wasm"), go.importObject).then((result) => {
+			go.run(result.instance);
+		});
+	</script>
+</body>
+</html>
