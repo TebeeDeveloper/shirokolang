@@ -1,16 +1,848 @@
+```html
 <!DOCTYPE html>
 <html lang="vi">
+
 <head>
-	<meta charset="UTF-8">
-	<title>Shiroko Web Compiler</title>
-	<script src="wasm_exec.js"></script>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>Shiroko Web Compiler</title>
+
+    <!-- Go WebAssembly Runtime -->
+    <script src="wasm_exec.js"></script>
+
+
+    <style>
+
+        /* =========================
+           RESET
+        ========================= */
+
+        * {
+            box-sizing: border-box;
+        }
+
+
+        html,
+        body {
+
+            margin: 0;
+            padding: 0;
+
+            width: 100%;
+            height: 100%;
+
+            overflow: hidden;
+
+            background: #000;
+
+            font-family:
+                Consolas,
+                "Courier New",
+                monospace;
+        }
+
+
+        /* =========================
+           MATRIX
+        ========================= */
+
+        #matrix {
+
+            position: fixed;
+
+            top: 0;
+            left: 0;
+
+            width: 100vw;
+            height: 100vh;
+
+            z-index: 0;
+
+            pointer-events: none;
+        }
+
+
+        /* =========================
+           MAIN CONTAINER
+        ========================= */
+
+        .container {
+
+            position: relative;
+
+            z-index: 10;
+
+            width: 700px;
+
+            max-width: 90%;
+
+            margin: 30px auto;
+        }
+
+
+        /* =========================
+           TITLE
+        ========================= */
+
+        h1 {
+
+            margin: 0 0 20px 0;
+
+            text-align: center;
+
+            color: #00ff41;
+
+            font-size: 32px;
+
+            letter-spacing: 2px;
+
+            text-shadow:
+
+                0 0 5px #00ff41,
+
+                0 0 15px #00ff41,
+
+                0 0 30px #00ff41;
+        }
+
+
+        /* =========================
+           COMPILER BOX
+        ========================= */
+
+        .box {
+
+            background:
+                rgba(0, 0, 0, 0.88);
+
+            border:
+                1px solid #00ff41;
+
+            border-radius: 10px;
+
+            padding: 25px;
+
+            box-shadow:
+
+                0 0 10px
+                rgba(0, 255, 65, 0.2),
+
+                0 0 25px
+                rgba(0, 255, 65, 0.15);
+        }
+
+
+        /* =========================
+           LABEL
+        ========================= */
+
+        label {
+
+            display: block;
+
+            color: #00ff41;
+
+            margin-top: 10px;
+
+            margin-bottom: 5px;
+
+            font-size: 14px;
+        }
+
+
+        /* =========================
+           INPUT + SELECT
+        ========================= */
+
+        input,
+        select {
+
+            width: 100%;
+
+            height: 42px;
+
+            padding: 10px;
+
+            background: #050505;
+
+            color: #00ff41;
+
+            border:
+                1px solid #00ff41;
+
+            border-radius: 4px;
+
+            font-family:
+                Consolas,
+                "Courier New",
+                monospace;
+
+            font-size: 14px;
+
+            outline: none;
+        }
+
+
+        /* FILE INPUT */
+
+        input[type="file"] {
+
+            padding: 8px;
+
+            cursor: pointer;
+        }
+
+
+        /* SELECT */
+
+        select {
+
+            cursor: pointer;
+        }
+
+
+        select option {
+
+            background: #050505;
+
+            color: #00ff41;
+        }
+
+
+        /* FOCUS */
+
+        input:focus,
+        select:focus {
+
+            box-shadow:
+
+                0 0 8px
+                rgba(0, 255, 65, 0.5);
+        }
+
+
+        /* =========================
+           COMPILE BUTTON
+        ========================= */
+
+        button {
+
+            display: block;
+
+            margin: 20px auto 0 auto;
+
+            padding: 11px 28px;
+
+            background: #00ff41;
+
+            color: #000;
+
+            border: none;
+
+            border-radius: 5px;
+
+            font-family:
+                Consolas,
+                "Courier New",
+                monospace;
+
+            font-size: 14px;
+
+            font-weight: bold;
+
+            cursor: pointer;
+
+            transition: 0.2s;
+        }
+
+
+        button:hover {
+
+            background: #ffffff;
+
+            box-shadow:
+
+                0 0 10px #00ff41,
+
+                0 0 25px #00ff41;
+
+            transform:
+                scale(1.04);
+        }
+
+
+        button:active {
+
+            transform:
+                scale(0.98);
+        }
+
+
+        /* =========================
+           OUTPUT
+        ========================= */
+
+        #output {
+
+            margin-top: 15px;
+
+            padding: 12px;
+
+            min-height: 80px;
+
+            max-height: 200px;
+
+            overflow: auto;
+
+            background: #020202;
+
+            border:
+                1px solid #064d20;
+
+            border-radius: 4px;
+
+            color: #00ff41;
+
+            white-space: pre-wrap;
+
+            font-family:
+                Consolas,
+                "Courier New",
+                monospace;
+
+            font-size: 13px;
+
+            line-height: 1.5;
+        }
+
+
+        /* =========================
+           MOBILE
+        ========================= */
+
+        @media (max-width: 600px) {
+
+            .container {
+
+                width: 94%;
+
+                margin: 20px auto;
+            }
+
+
+            h1 {
+
+                font-size: 22px;
+
+                margin-bottom: 15px;
+            }
+
+
+            .box {
+
+                padding: 18px;
+            }
+
+
+            button {
+
+                width: 100%;
+            }
+        }
+
+    </style>
+
 </head>
+
+
 <body>
-	<script>
-		const go = new Go();
-		WebAssembly.instantiateStreaming(fetch("shiroko.wasm"), go.importObject).then((result) => {
-			go.run(result.instance);
-		});
-	</script>
+
+
+    <!-- =========================
+         MATRIX BACKGROUND
+    ========================= -->
+
+    <canvas id="matrix"></canvas>
+
+
+    <!-- =========================
+         MAIN INTERFACE
+    ========================= -->
+
+    <div class="container">
+
+
+        <h1>
+            SHIROKO WEB COMPILER
+        </h1>
+
+
+        <div class="box">
+
+
+            <!-- FILE -->
+
+            <label for="sourceFile">
+                Chọn file:
+            </label>
+
+            <input
+                type="file"
+                id="sourceFile"
+            >
+
+
+            <!-- FILE NAME -->
+
+            <label for="fileName">
+                Tên file biên dịch:
+            </label>
+
+            <input
+                type="text"
+                id="fileName"
+                placeholder="Ví dụ: main.sk"
+            >
+
+
+            <!-- TARGET -->
+
+            <!-- TARGET -->
+
+<label for="target">
+    Target:
+</label>
+
+<select id="target">
+
+    <option value="cpp">
+        C++
+    </option>
+
+</select>
+
+
+<!-- COMPILER -->
+
+<label for="compiler">
+    Compiler:
+</label>
+
+<select id="compiler">
+
+    <option value="g++">
+        g++
+    </option>
+
+    <option value="clang++">
+        clang++
+    </option>
+
+    <option value="msvc">
+        MSVC
+    </option>
+
+</select>
+
+            </select>
+
+
+            <!-- COMPILE -->
+
+            <button onclick="compile()">
+                COMPILE
+            </button>
+
+
+            <!-- OUTPUT -->
+
+            <div id="output">
+                Đang khởi động compiler...
+            </div>
+
+
+        </div>
+
+    </div>
+
+
+
+    <script>
+
+
+        /* ==================================================
+           MATRIX DIGITAL RAIN
+        ================================================== */
+
+
+        const canvas =
+            document.getElementById("matrix");
+
+        const ctx =
+            canvas.getContext("2d");
+
+
+        let fontSize = 16;
+
+        let columns;
+
+        let drops;
+
+
+        function resizeMatrix() {
+
+            canvas.width =
+                window.innerWidth;
+
+            canvas.height =
+                window.innerHeight;
+
+
+            columns =
+                Math.floor(
+                    canvas.width / fontSize
+                );
+
+
+            drops = [];
+
+
+            for (
+                let i = 0;
+                i < columns;
+                i++
+            ) {
+
+                drops[i] =
+                    Math.floor(
+                        Math.random() * -100
+                    );
+
+            }
+
+        }
+
+
+        resizeMatrix();
+
+
+        const characters =
+
+            "アァカサタナハマヤャラワ" +
+
+            "ガザダバパ" +
+
+            "アァカサタナハマヤャラワ" +
+
+            "アァカサタナハマヤャラワ" +
+
+            "アァカサタナハマヤャラワ";
+
+
+        function drawMatrix() {
+
+
+            /*
+             * Lớp đen trong suốt
+             * tạo hiệu ứng đuôi
+             */
+
+            ctx.fillStyle =
+                "rgba(0, 0, 0, 0.06)";
+
+
+            ctx.fillRect(
+
+                0,
+                0,
+
+                canvas.width,
+                canvas.height
+            );
+
+
+            ctx.font =
+                fontSize + "px monospace";
+
+
+            for (
+                let i = 0;
+                i < drops.length;
+                i++
+            ) {
+
+
+                const character =
+
+                    characters[
+                        Math.floor(
+                            Math.random() *
+                            characters.length
+                        )
+                    ];
+
+
+                /*
+                 * Một vài ký tự
+                 * sáng trắng
+                 */
+
+                if (
+                    Math.random() > 0.98
+                ) {
+
+                    ctx.fillStyle =
+                        "#ffffff";
+
+                } else {
+
+                    ctx.fillStyle =
+                        "#00ff41";
+                }
+
+
+                ctx.fillText(
+
+                    character,
+
+                    i * fontSize,
+
+                    drops[i] * fontSize
+                );
+
+
+                /*
+                 * Khi xuống cuối màn hình
+                 * thì quay lại phía trên
+                 */
+
+                if (
+
+                    drops[i] * fontSize >
+                    canvas.height &&
+
+                    Math.random() > 0.975
+
+                ) {
+
+                    drops[i] = 0;
+                }
+
+
+                drops[i]++;
+
+            }
+
+        }
+
+
+        setInterval(
+            drawMatrix,
+            35
+        );
+
+
+        window.addEventListener(
+            "resize",
+            resizeMatrix
+        );
+
+
+
+        /* ==================================================
+           GO WASM
+        ================================================== */
+
+
+        let wasmReady = false;
+
+
+        const go = new Go();
+
+
+        WebAssembly.instantiateStreaming(
+
+            fetch("shiroko.wasm"),
+
+            go.importObject
+
+        )
+
+        .then((result) => {
+
+
+            /*
+             * Chạy Go WASM
+             */
+
+            go.run(
+                result.instance
+            );
+
+
+            wasmReady = true;
+
+
+            document.getElementById(
+                "output"
+            ).textContent =
+
+                "Shiroko Compiler đã sẵn sàng.";
+
+
+        })
+
+
+        .catch((error) => {
+
+
+            document.getElementById(
+                "output"
+            ).textContent =
+
+                "Không thể tải WASM:\n" +
+                error;
+
+
+            console.error(error);
+
+        });
+
+
+
+        /* ==================================================
+           COMPILE
+        ================================================== */
+
+
+        async function compile() {
+
+
+            if (!wasmReady) {
+
+                alert(
+                    "Compiler chưa sẵn sàng!"
+                );
+
+                return;
+            }
+
+
+            const fileInput =
+
+                document.getElementById(
+                    "sourceFile"
+                );
+
+
+            const fileName =
+
+                document.getElementById(
+                    "fileName"
+                ).value;
+
+
+            /*
+             * Target hiện tại
+             * CHỈ LÀ GIAO DIỆN.
+             *
+             * Chưa truyền vào compiler.
+             */
+
+            const target =
+    document.getElementById(
+        "target"
+    ).value;
+
+const compiler =
+    document.getElementById(
+        "compiler"
+    ).value;
+
+
+            if (
+                fileInput.files.length === 0
+            ) {
+
+                alert(
+                    "Vui lòng chọn file!"
+                );
+
+                return;
+            }
+
+
+            if (!fileName) {
+
+                alert(
+                    "Vui lòng nhập tên file!"
+                );
+
+                return;
+            }
+
+
+            const file =
+                fileInput.files[0];
+
+
+            const sourceCode =
+                await file.text();
+
+
+            document.getElementById(
+                "output"
+            ).textContent =
+
+                "Target: " +
+                target +
+
+                "\nĐang biên dịch...";
+
+
+            try {
+
+    const result = window.CompileJS(
+        sourceCode,
+        fileName
+    );
+
+    // Compiler trả về dictionary/object
+    if (result.status !== 200) {
+
+        document.getElementById("output").textContent =
+            "Compile error:\n" +
+            result.message;
+
+        return;
+    }
+
+    // Compile thành công
+    document.getElementById("output").textContent =
+        result.message;
+
+}
+catch (error) {
+
+    // Lỗi JavaScript / WASM thực sự
+    document.getElementById("output").textContent =
+        "System error:\n" +
+        error;
+
+    console.error(error);
+
+}
+
+        }
+
+    </script>
+
+
 </body>
+
 </html>
+```
