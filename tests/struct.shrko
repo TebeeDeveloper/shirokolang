@@ -1,0 +1,22 @@
+package main
+
+import {
+  "std/fmt"
+}
+
+interface GiaoDien {
+  area() float
+}
+
+struct HinhVuong {
+  dai int
+}
+
+fn (HinhVuong) area() float {
+  return self.dai * self.dai
+}
+
+fn main() {
+  let hv = HinhVuong{dai: 5}
+  fmt.println(hv.area())
+}

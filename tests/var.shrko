@@ -1,0 +1,12 @@
+package main
+
+import {
+  "std/fmt"
+}
+
+fn main() {
+  let x = 10
+  const PI = 3.14
+  let y = int(PI)
+  fmt.println(x, y)
+}

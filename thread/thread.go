@@ -1,71 +1,32 @@
-// shiroko/thread/thread.go
-
 package thread
 
 import (
-	"shiroko/cnv"
+	"fmt"
+
 	"shiroko/cli"
 	"shiroko/core"
 )
 
-type Thread struct {
-	Version string
-	Help string
-	Error error
+func RunJS(cmd *cli.Cmd) error {
+	if cmd.Error != "" {
+		return cmd.RaiseError()
+	}
+	return core.CompileFile(cmd.Input, cmd.Output, cmd.Verbose)
 }
 
-func Run(cmd cli.Cmd) Thread {
-
+func RunCLI(cmd *cli.Cmd) string {
 	if cmd.Error != "" {
-		return Thread{Error: cnv.CliError(cmd)}
-	}
-
-	if cmd.Version {
-		return Thread{Version: core.ShowVersion()}
-
-	}
-
-	if cmd.Help {
-		return Thread{Help: core.ShowHelp(cmd.Cli)}
-	}
-
-	if cmd.Build {
-		var err error
-		if cmd.Verbose {
-			err = core.CompileFile(cmd.Input, cmd.Output, true)
-			return Thread{Error: err}
-		}
-		err = core.CompileFile(cmd.Input, cmd.Output, false)
-		return Thread{Error: err}
-	}
-
-	return Thread{}
-}
-
-func CliRun() Thread {
-	var cmd cli.Cmd = cli.ParseCli()
-
-	if cmd.Error != "" {
-		return Thread{Error: cnv.CliError(cmd)}
+		return fmt.Sprintf("%v\n", cmd.RaiseError())
 	}
 	if cmd.Version {
-		return Thread{Version: core.ShowVersion()}
-
+		return core.ShowVersion()
 	}
-
 	if cmd.Help {
-		return Thread{Help: core.ShowHelp(cmd.Cli)}
+		return core.ShowHelp(cmd.Cli)
 	}
-
-	if cmd.Build {
-		var err error
-		if cmd.Verbose {
-			err = core.CompileFile(cmd.Input, cmd.Output, true)
-			return Thread{Error: err}
-		}
-		err = core.CompileFile(cmd.Input, cmd.Output, false)
-		return Thread{Error: err}
+	err := core.CompileFile(cmd.Input, cmd.Output, cmd.Verbose)
+	if err != nil {
+		return fmt.Sprintf("%v", err)
 	}
-
-	return Thread{}
+	return ""
 }

@@ -1,0 +1,20 @@
+package main
+
+import {
+  "std/fmt"
+}
+
+fn factorial(n int) int {
+  if n <= 1 { return 1 }
+  return n * factorial(n - 1)
+}
+
+fn fib(n int) int {
+  if n < 2 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+
+fn main() {
+  fmt.println(factorial(10))
+  fmt.println(fib(20))
+}
