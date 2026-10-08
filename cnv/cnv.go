@@ -4,9 +4,11 @@ package cnv
 
 import (
 	"fmt"
-	"shiroko/core/parse"
 	"shiroko/cli"
 	"strings"
+	"shiroko/core/parser"
+	"shiroko/core/sema"
+	"shiroko/core/lower"
 )
 
 func PrintError(err error) string {
@@ -17,15 +19,30 @@ func CliError(cmd cli.Cmd) error {
 	return fmt.Errorf("%s", cmd.Error)
 }
 
-func ParserError(p parse.Parser) error {
-	var e string
+func ParserError(errs []*parser.ParseError) error {
 	var sb strings.Builder
-	for _, e = range p.Error {
-		sb.WriteString(e)
-		sb.WriteByte('\n')
+	for _, e := range errs {
+		fmt.Fprintf(&sb, "%s\n", e.Error())
 	}
 
-	return fmt.Errorf("[Parser] error {\n%s}", sb.String())
+	return fmt.Errorf("Parser Error(s):\n%s\n", sb.String())
+}
+
+func SemaError(errs []*sema.SemaError) error {
+	var sb strings.Builder
+	for _, se := range errs {
+		fmt.Fprintf(&sb, "%s\n", se.Error())
+	}
+
+	return fmt.Errorf("Semantic Error(s):\n%s\n", sb.String())
+}
+
+func LowerError(errs []*lower.LowerError) error {
+	var sb strings.Builder
+	for _, e := range errs {
+		fmt.Fprintf(&sb, "%s\n", e.Error())
+	}
+	return fmt.Errorf("Lower Error(s):\n%s\n", sb.String())
 }
 
 func CompileError(err error) error {
