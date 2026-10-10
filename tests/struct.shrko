@@ -12,11 +12,11 @@ struct HinhVuong {
   dai int
 }
 
-fn (HinhVuong) area() float {
-  return self.dai * self.dai
+func (HinhVuong) area() float {
+  return float(self.dai * self.dai)
 }
 
-fn main() {
+func main() {
   let hv = HinhVuong{dai: 5}
   fmt.println(hv.area())
 }

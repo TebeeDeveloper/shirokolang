@@ -11,7 +11,7 @@ date: "2026"
   - Trần Trung Nghĩa (technical leader) — lớp 10A6
   - Trần Đào Gia Minh (web designer) — lớp 12A1
 - Đơn vị: trường THPT Nguyễn Thần Hiến
-- Phiên bản: 26.01 (năm 2026)
+- Phiên bản: 26.10 (năm 2026)
 
 ## 1. Tổng quan (Overview)
 ### 1.1. Giới thiệu
@@ -544,8 +544,8 @@ hướng tới:
 
 Mốc version định hướng dài hạn:
 
-- v26.02 (2026): package manager
-- v26.03 (2026): parser self-hosted hoàn chỉnh
+- v26.11 (2026): package manager
+- v26.12 (2026): parser self-hosted hoàn chỉnh
 - v27.01 (2027): generics
 
 Mục tiêu cuối cùng: trở thành một ngôn ngữ lập trình Việt Nam thực thụ,

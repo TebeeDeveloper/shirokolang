@@ -49,19 +49,24 @@ func (l *Lowerer) lowerDecl(d any) any {
 		case "InterfaceDecl":
 			return []any{"Interface", n[1], append([]any{}, n[2].([]any)...)}
 		case "FnDecl":
+			// ["FnDecl", name, params, ret, errTy, body]
+			// IR:     ["Fn", name, params, ret, body, recv, errTy]
 			return []any{
 				"Fn",
 				n[1],
 				append([]any{}, n[2].([]any)...),
 				n[3],
-				l.lowerBlock(n[4]),
+				l.lowerBlock(n[5]),
 				nil,
+				n[4],
 			}
 		case "MethodDecl":
+			// ["MethodDecl", recv, name, params, ret, errTy, body]
+			// IR:           ["Fn", name, params, ret, body, recv, errTy]
 			recv := n[1]
 			selfParam := []any{"Param", "self", []any{"NamedType", recv}, false}
 			params := append([]any{selfParam}, n[3].([]any)...)
-			return []any{"Fn", n[2], params, n[4], l.lowerBlock(n[5]), recv}
+			return []any{"Fn", n[2], params, n[4], l.lowerBlock(n[6]), recv, n[5]}
 	}
 	l.err(fmt.Sprintf("unknown decl %q", n[0].(string)))
 	return nil
@@ -81,13 +86,46 @@ func (l *Lowerer) lowerStmt(s any) []any {
 	n := s.([]any)
 	switch n[0].(string) {
 		case "LetStmt":
-			if isComp(n[3]) {
-				return l.lowerComp(n[3].([]any), n[1].(string), true)
+			names := n[1].([]string)
+			tyNode := n[2]
+			expr := n[3]
+			els := n[4]
+
+			// `let x = do() else { ... }` — the else block runs when
+			// `expr` (a fallible call) fails. Kept as its own node so
+			// the emitter can produce `x, err := ...; if err != nil {...}`.
+			if els != nil {
+				if len(names) != 1 {
+					l.err("let-else requires exactly one name")
+					return nil
+				}
+				return []any{[]any{"HErrLet",
+					names[0],
+					tyNode,
+					l.lowerExpr(expr),
+					l.lowerBlock(els),
+				}}
 			}
-			if isRange(n[3]) {
-				return l.lowerRange(n[3].([]any), n[1].(string), true)
+
+			if isComp(expr) {
+				if len(names) != 1 {
+					l.err("comprehension can only bind a single name")
+					return nil
+				}
+				return l.lowerComp(expr.([]any), names[0], true)
 			}
-			return []any{[]any{"HLet", n[1], n[2], l.lowerExpr(n[3])}}
+			if isRange(expr) {
+				if len(names) != 1 {
+					l.err("range literal can only bind a single name")
+					return nil
+				}
+				return l.lowerRange(expr.([]any), names[0], true)
+			}
+
+			if len(names) == 1 {
+				return []any{[]any{"HLet", names[0], tyNode, l.lowerExpr(expr)}}
+			}
+			return []any{[]any{"HMultiLet", names, l.lowerExpr(expr)}}
 
 		case "AssignStmt":
 			if isComp(n[2]) {
@@ -127,7 +165,12 @@ func (l *Lowerer) lowerStmt(s any) []any {
 			return []any{[]any{"HExprStmt", l.lowerExpr(n[1])}}
 
 		case "ReturnStmt":
-			return []any{[]any{"HReturn", l.lowerExpr(n[1])}}
+			exprs := n[1].([]any)
+			var lowered []any
+			for _, e := range exprs {
+				lowered = append(lowered, l.lowerExpr(e))
+			}
+			return []any{[]any{"HReturn", lowered}}
 
 		case "IfStmt":
 			return []any{l.lowerIf(n)}
@@ -169,16 +212,14 @@ func (l *Lowerer) lowerForC(s []any) []any {
 	post := s[4]
 	body := s[5]
 
-	inner := l.lowerBlock(body).([]any)[1].([]any)
-	postIR := l.lowerForPost(post)
-
-	loopStmts := append([]any{}, inner...)
-	loopStmts = append(loopStmts, postIR)
-	loopBody := []any{"HBlock", loopStmts}
-
 	return []any{
-		[]any{"HLet", varName, nil, l.lowerExpr(init)},
-		[]any{"HWhile", l.lowerExpr(cond), loopBody},
+		[]any{"HFor",
+			varName,
+			l.lowerExpr(init),
+			l.lowerExpr(cond),
+			l.lowerForPost(post),
+			l.lowerBlock(body),
+		},
 	}
 }
 
@@ -208,24 +249,8 @@ func (l *Lowerer) lowerForRange(s []any) []any {
 	count := s[1]
 	body := s[2]
 
-	i := l.newTmp()
-	bodyStmts := l.lowerBlock(body).([]any)[1].([]any)
-
-	increment := []any{
-		"HAssign",
-		[]any{"HIdent", i},
-		[]any{"HBin", "+", []any{"HIdent", i}, []any{"HInt", 1}},
-	}
-
-	loopStmts := append([]any{}, bodyStmts...)
-	loopStmts = append(loopStmts, increment)
-	loopBody := []any{"HBlock", loopStmts}
-
 	return []any{
-		[]any{"HLet", i, nil, []any{"HInt", 0}},
-		[]any{"HWhile",
-			[]any{"HBin", "<", []any{"HIdent", i}, l.lowerExpr(count)},
-			loopBody},
+		[]any{"HForRange", l.lowerExpr(count), l.lowerBlock(body)},
 	}
 }
 
@@ -401,9 +426,6 @@ func (l *Lowerer) lowerComp(comp []any, target string, declare bool) []any {
 	return stmts
 }
 
-// lowerComp lowers `[]T{ v @ src | f ; g }` into a statement list.
-// declare=true emits `:=` for the initial empty literal, false emits `=`.
-
 func isRange(e any) bool {
 	if e == nil {
 		return false
@@ -534,6 +556,8 @@ func (l *Lowerer) lowerExpr(e any) any {
 			return []any{"HStr", n[1]}
 		case "BoolExpr":
 			return []any{"HBool", n[1]}
+		case "NilExpr":
+			return []any{"HNil"}
 		case "IdentExpr":
 			return []any{"HIdent", n[1]}
 		case "UnaryExpr":
@@ -598,14 +622,15 @@ func (l *Lowerer) lowerExpr(e any) any {
 			l.err("spread `...` only allowed in call arguments")
 			return []any{"HInt", 0}
 		case "FnLitExpr":
+			// ["FnLitExpr", params, ret, errTy, body]
 			return []any{"HFnLit",
 				append([]any{}, n[1].([]any)...),
 				n[2],
-				l.lowerBlock(n[3])}
+				n[3], // errTy
+				l.lowerBlock(n[4])}
 		case "MatchExpr":
 			l.err("match is only valid as a statement")
 			return []any{"HInt", 0}
-
 		case "RangeLitExpr":
 			l.err("range literal is only valid as the RHS of a let/assign")
 			return []any{"HInt", 0}

@@ -4,8 +4,8 @@ import {
   "std/fmt"
 }
 
-fn f[T](x T) T {
+func f[T](x T) T {
   return x[0]
 }
 
-fn main() {}
+func main() {}

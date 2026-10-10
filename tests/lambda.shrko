@@ -4,7 +4,7 @@ import {
   "std/fmt"
 }
 
-fn main() {
+func main() {
   let cong = fn(a, b int) int {
     return a + b
   }

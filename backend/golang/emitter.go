@@ -1,904 +1,1081 @@
+// backend/golang/golang.go
 package golang
 
 import (
-	"bytes"
-	"context"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
-	"time"
+
+	"shiroko/core/color"
+	"shiroko/core/source"
 )
 
-var goTypeMap = map[string]string{
-	"int":    "int",
-	"byte":   "byte",
-	"float":  "float64",
-	"string": "string",
-	"bool":   "bool",
-	"any":    "any",
-	"void":   "",
+// ---------- errors ----------
+
+type CodegenError struct {
+	Code string
+	Msg  string
+	Line int
+	Col  int
+	Src  *source.Source
 }
 
-var binopMap = map[string]string{
-	"+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
-	"==": "==", "!=": "!=", "<": "<", ">": ">", "<=": "<=", ">=": ">=",
-	"&&": "&&", "||": "||",
+func (e *CodegenError) String() string {
+	return fmt.Sprintf("%s %s %s",
+			   color.Magenta("golang error"),
+			   color.Dim("=>"),
+			   e.Msg,
+	)
 }
 
-var unopMap = map[string]string{"-": "-", "!": "!"}
+func (e *CodegenError) Error() string { return e.String() }
 
-var convMap = map[string]string{
-	"string": "string",
-	"int":    "int",
-	"byte":   "byte",
-	"float":  "float64",
+// ---------- Writer ----------
+
+type Writer struct {
+	sb     strings.Builder
+	indent int
 }
 
-var reserved = map[string]bool{
-	"type": true, "range": true, "func": true, "map": true, "chan": true,
-	"go": true, "defer": true, "select": true, "switch": true, "case": true,
-	"default": true, "fallthrough": true, "package": true, "import": true,
-	"var": true, "const": true, "return": true, "break": true, "continue": true,
-	"goto": true, "if": true, "else": true, "for": true,
+func NewWriter() *Writer { return &Writer{} }
+
+func (w *Writer) Line(parts ...string) {
+	w.tabs()
+	for _, p := range parts {
+		w.sb.WriteString(p)
+	}
+	w.sb.WriteByte('\n')
 }
+
+func (w *Writer) LineNoIndent(parts ...string) {
+	for _, p := range parts {
+		w.sb.WriteString(p)
+	}
+	w.sb.WriteByte('\n')
+}
+
+func (w *Writer) Raw(s string) { w.sb.WriteString(s) }
+
+func (w *Writer) Indented(fn func()) {
+	w.indent++
+	fn()
+	w.indent--
+}
+
+func (w *Writer) Block(header string, body func()) {
+	w.Line(header)
+	w.Indented(body)
+	w.Line("}")
+}
+
+func (w *Writer) tabs() {
+	for i := 0; i < w.indent; i++ {
+		w.sb.WriteByte('\t')
+	}
+}
+
+func (w *Writer) String() string { return w.sb.String() }
+
+// ---------- stdlib table ----------
+
+type stdlibEntry struct {
+	path    string
+	members map[string]string
+}
+
+var stdlib = map[string]stdlibEntry{
+	"fmt": {
+		path: "fmt",
+		members: map[string]string{
+			"println":  "Println",
+			"printf":   "Printf",
+			"print":    "Print",
+			"sprintf":  "Sprintf",
+			"sprintln": "Sprintln",
+			"errorf":   "Errorf",
+		},
+	},
+	"strings": {
+		path: "strings",
+		members: map[string]string{
+			"contains":   "Contains",
+			"has_prefix": "HasPrefix",
+			"has_suffix": "HasSuffix",
+			"split":      "Split",
+			"join":       "Join",
+			"trim":       "TrimSpace",
+			"to_upper":   "ToUpper",
+			"to_lower":   "ToLower",
+			"replace":    "Replace",
+			"repeat":     "Repeat",
+			"index":      "Index",
+		},
+	},
+	"strconv": {
+		path: "strconv",
+		members: map[string]string{
+			"atoi":         "Atoi",
+			"itoa":         "Itoa",
+			"parse_int":    "ParseInt",
+			"parse_float":  "ParseFloat",
+			"format_int":   "FormatInt",
+			"format_float": "FormatFloat",
+			"quote":        "Quote",
+		},
+	},
+	"os": {
+		path: "os",
+		members: map[string]string{
+			"exit":   "Exit",
+			"args":   "Args",
+			"getenv": "Getenv",
+			"setenv": "Setenv",
+		},
+	},
+	"math": {
+		path: "math",
+		members: map[string]string{
+			"sqrt":  "Sqrt",
+			"abs":   "Abs",
+			"pow":   "Pow",
+			"floor": "Floor",
+			"ceil":  "Ceil",
+		},
+	},
+	"sort": {
+		path: "sort",
+		members: map[string]string{
+			"ints":    "Ints",
+			"strings": "Strings",
+			"slice":   "Slice",
+		},
+	},
+}
+
+// ---------- emitter ----------
 
 type GoEmitter struct {
-	prog         []any
-	buf          []string
-	indent       int
-	structFields map[string]map[string]any
-	methods      map[string]map[string]bool
-	freeFns      map[string]bool
+	Errors []*CodegenError
+	w      *Writer
+	src    *source.Source
+
+	needsRange bool
+
+	pkgs map[string]stdlibEntry
+
+	// fnRetTy is the return-type node of the function currently being
+	// emitted, or nil for void.
+	fnRetTy any
+
+	// fnErrTy is the declared error type of the current function, or
+	// nil if not fallible.
+	fnErrTy any
+
+	// fnRetSlots is the number of success values the current function
+	// returns (0 void, 1 single, N tuple).
+	fnRetSlots int
+
+	// errVar is the emitter-side name of the innermost let-else error
+	// variable (`__err1`, `__err2`, ...). Bare `return` inside the
+	// else block re-raises it.
+	errVar string
+
+	// errRename, when non-empty, is the emitter-side name that the
+	// source identifier `err` should be rewritten to while emitting
+	// the current else block. Matches errVar.
+	errRename string
+
+	// errCounter gives each let-else a unique __errN name so nested
+	// or sibling let-else statements don't collide.
+	errCounter int
 }
 
-func New(prog []any) *GoEmitter {
+func New(src *source.Source) *GoEmitter {
 	return &GoEmitter{
-		prog:         prog,
-		structFields: map[string]map[string]any{},
-		methods:      map[string]map[string]bool{},
-		freeFns:      map[string]bool{},
+		w:    NewWriter(),
+		src:  src,
+		pkgs: map[string]stdlibEntry{},
 	}
 }
 
-// ---------- buffer helpers ----------
-
-func (g *GoEmitter) w(line string) {
-	g.buf = append(g.buf, strings.Repeat("    ", g.indent)+line)
+func Generate(prog []any, src *source.Source) (string, []*CodegenError) {
+	return New(src).Generate(prog)
 }
 
-func (g *GoEmitter) push() { g.indent++ }
-func (g *GoEmitter) pop()  { g.indent-- }
-
-func (g *GoEmitter) result() string {
-	return strings.Join(g.buf, "\n") + "\n"
+func (e *GoEmitter) err(format string, args ...any) {
+	e.Errors = append(e.Errors, &CodegenError{Msg: fmt.Sprintf(format, args...)})
 }
 
-// ---------- entry point ----------
-
-func (g *GoEmitter) Emit() string {
-	pkg := g.prog[1].(string)
-	decls := g.prog[3].([]any)
-
-	for _, d := range decls {
-		dd := d.([]any)
-		switch dd[0].(string) {
-			case "Struct":
-				name := dd[1].(string)
-				fields := dd[2].([]any)
-				fmap := map[string]any{}
-				for _, f := range fields {
-					ff := f.([]any)
-					fmap[ff[1].(string)] = ff[2]
-				}
-				g.structFields[name] = fmap
-			case "Fn":
-				name := dd[1].(string)
-				recv := dd[5]
-				if recv == nil {
-					g.freeFns[name] = true
-				} else {
-					recvName := recv.(string)
-					if g.methods[recvName] == nil {
-						g.methods[recvName] = map[string]bool{}
-					}
-					g.methods[recvName][name] = true
-				}
-		}
+func lastSeg(p string) string {
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		return p[i+1:]
 	}
-
-	g.w(fmt.Sprintf("package %s", pkg))
-	g.w("")
-
-	if g.usesFmt() {
-		g.w("import (")
-		g.push()
-		g.w("\"fmt\"")
-		g.pop()
-		g.w(")")
-		g.w("")
-	}
-
-	// g.emitSetPrelude()
-
-	for _, d := range decls {
-		g.emitDecl(d)
-		g.w("")
-	}
-
-	src := g.result()
-	return g.gofmt(src)
+	return p
 }
 
-// usesFmt reports whether the IR contains any call to fmt.X(...).
-func (g *GoEmitter) usesFmt() bool {
-	for _, d := range g.prog[3].([]any) {
-		dd := d.([]any)
-		if dd[0].(string) == "Fn" {
-			if blockUsesFmt(dd[4]) {
-				return true
-			}
-		}
-	}
-	return false
-}
+// ---------- constant folding ----------
 
-func blockUsesFmt(block any) bool {
-	for _, s := range block.([]any)[1].([]any) {
-		if stmtUsesFmt(s) {
-			return true
-		}
+func constInt(node any) (int, bool) {
+	n, ok := node.([]any)
+	if !ok || len(n) == 0 {
+		return 0, false
 	}
-	return false
-}
-
-func stmtUsesFmt(s any) bool {
-	n := s.([]any)
 	switch n[0].(string) {
-		case "HLet":
-			return exprUsesFmt(n[3])
-		case "HAssign":
-			return exprUsesFmt(n[1]) || exprUsesFmt(n[2])
-		case "HExprStmt":
-			return exprUsesFmt(n[1])
-		case "HReturn":
-			return exprUsesFmt(n[1])
-		case "HIf":
-			if exprUsesFmt(n[1]) {
-				return true
-			}
-			if blockUsesFmt(n[2]) {
-				return true
-			}
-			if n[3] != nil && blockUsesFmt(n[3]) {
-				return true
-			}
-			return false
-		case "HWhile":
-			if exprUsesFmt(n[1]) {
-				return true
-			}
-			return blockUsesFmt(n[2])
-		case "HSwitch":
-			cases := n[1].([]any)
-			defaultBody := n[2]
-			for _, c := range cases {
-				cs := c.([]any)
-				if exprUsesFmt(cs[1]) {
-					return true
-				}
-				if blockUsesFmt(cs[2]) {
-					return true
-				}
-			}
-			if defaultBody != nil && blockUsesFmt(defaultBody) {
-				return true
-			}
-			return false
-	}
-	return false
-}
-
-func exprUsesFmt(e any) bool {
-	if e == nil {
-		return false
-	}
-	n := e.([]any)
-	switch n[0].(string) {
-		case "HInt", "HFloat", "HByte", "HStr", "HBool", "HIdent":
-			return false
+		case "HInt":
+			v, ok := n[1].(int)
+			return v, ok
+		case "HByte":
+			v, ok := n[1].(int)
+			return v, ok
 		case "HUn":
-			return exprUsesFmt(n[2])
-		case "HBin":
-			return exprUsesFmt(n[2]) || exprUsesFmt(n[3])
-		case "HCall":
-			if cn, ok := n[1].([]any); ok && cn[0].(string) == "HSel" {
-				if bn, ok := cn[1].([]any); ok &&
-					bn[0].(string) == "HIdent" && bn[1].(string) == "fmt" {
-						return true
-					}
-			}
-			if exprUsesFmt(n[1]) {
-				return true
-			}
-			for _, a := range n[2].([]any) {
-				if exprUsesFmt(a) {
-					return true
+			if n[1].(string) == "-" {
+				if v, ok := constInt(n[2]); ok {
+					return -v, true
 				}
 			}
-			return false
-		case "HSel":
-			return exprUsesFmt(n[1])
-		case "HIndex":
-			return exprUsesFmt(n[1]) || exprUsesFmt(n[2])
-		case "HSlice":
-			return exprUsesFmt(n[1]) || exprUsesFmt(n[2]) || exprUsesFmt(n[3])
-		case "HStructLit":
-			for _, f := range n[2].([]any) {
-				ff := f.([]any)
-				if exprUsesFmt(ff[2]) {
-					return true
-				}
-			}
-			return false
-		case "HListLit", "HSetLit":
-			for _, x := range n[2].([]any) {
-				if exprUsesFmt(x) {
-					return true
-				}
-			}
-			return false
-		case "HSpread":
-			return exprUsesFmt(n[1])
 	}
-	return false
+	return 0, false
 }
 
-func (g *GoEmitter) gofmt(src string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "gofmt")
-	cmd.Stdin = strings.NewReader(src)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err == nil {
-		return out.String()
+func rangeLit(lo, hi int) string {
+	if hi < lo {
+		return "[]int{}"
 	}
-	return src
-}
-
-func (g *GoEmitter) emitSetPrelude() {
-	g.w("type __Set[K comparable] map[K]struct{}")
-	g.w("")
-	g.w("func __setAdd[K comparable](s __Set[K], k K) __Set[K] {")
-	g.push()
-	g.w("s[k] = struct{}{}")
-	g.w("return s")
-	g.pop()
-	g.w("}")
-	g.w("")
-	g.w("func __setHas[K comparable](s __Set[K], k K) bool {")
-	g.push()
-	g.w("_, ok := s[k]")
-	g.w("return ok")
-	g.pop()
-	g.w("}")
-	g.w("")
+	var parts []string
+	for i := lo; i <= hi; i++ {
+		parts = append(parts, strconv.Itoa(i))
+	}
+	return "[]int{" + strings.Join(parts, ", ") + "}"
 }
 
 // ---------- types ----------
 
-func (g *GoEmitter) goType(t any) string {
-	if t == nil {
+var goBuiltins = map[string]string{
+	"int":    "int",
+	"float":  "float64",
+	"string": "string",
+	"byte":   "byte",
+	"bool":   "bool",
+	"any":    "any",
+	"error":  "error",
+}
+
+func (e *GoEmitter) goType(node any) string {
+	if node == nil {
 		return ""
 	}
-	tt := t.([]any)
-	switch tt[0].(string) {
+	n, ok := node.([]any)
+	if !ok || len(n) == 0 {
+		return "any"
+	}
+	switch n[0].(string) {
 		case "NamedType":
-			name := tt[1].(string)
-			if mapped, ok := goTypeMap[name]; ok {
-				return mapped
+			name := n[1].(string)
+			if g, ok := goBuiltins[name]; ok {
+				return g
 			}
 			return name
 		case "ListType":
-			return "[]" + g.goType(tt[1])
+			return "[]" + e.goType(n[1])
 		case "SetType":
-			return "__Set[" + g.goType(tt[1]) + "]"
+			return "[]" + e.goType(n[1])
+		case "TupleType":
+			var parts []string
+			for _, el := range n[1].([]any) {
+				parts = append(parts, e.goType(el))
+			}
+			if len(parts) == 1 {
+				return parts[0]
+			}
+			return "(" + strings.Join(parts, ", ") + ")"
 	}
+	e.err("unknown type node %q", n[0])
 	return "any"
+}
+
+func returnSlotCount(retNode any) int {
+	if retNode == nil {
+		return 0
+	}
+	n, ok := retNode.([]any)
+	if !ok || len(n) == 0 {
+		return 1
+	}
+	if n[0].(string) == "TupleType" {
+		return len(n[1].([]any))
+	}
+	return 1
+}
+
+func (e *GoEmitter) zeroValue(retNode any) string {
+	if retNode == nil {
+		return ""
+	}
+	n, ok := retNode.([]any)
+	if !ok || len(n) == 0 {
+		return "nil"
+	}
+	switch n[0].(string) {
+		case "NamedType":
+			switch n[1].(string) {
+				case "int", "byte":
+					return "0"
+				case "float":
+					return "0"
+				case "string":
+					return `""`
+				case "bool":
+					return "false"
+				case "any":
+					return "nil"
+			}
+			return "nil"
+				case "ListType", "SetType":
+					return "nil"
+	}
+	return "nil"
+}
+
+func (e *GoEmitter) zeroValues() []string {
+	if e.fnRetTy == nil {
+		return nil
+	}
+	n, ok := e.fnRetTy.([]any)
+	if !ok || len(n) == 0 {
+		return []string{"nil"}
+	}
+	if n[0].(string) == "TupleType" {
+		var out []string
+		for _, el := range n[1].([]any) {
+			out = append(out, e.zeroValue(el))
+		}
+		return out
+	}
+	return []string{e.zeroValue(e.fnRetTy)}
+}
+
+// ---------- program ----------
+
+func (e *GoEmitter) Generate(prog []any) (string, []*CodegenError) {
+	pkg := "main"
+	if len(prog) > 1 {
+		if p, ok := prog[1].(string); ok && p != "" && p != "<error>" {
+			pkg = p
+		}
+	}
+	var imports []string
+	if len(prog) > 2 {
+		if im, ok := prog[2].([]string); ok {
+			imports = im
+		}
+	}
+	var decls []any
+	if len(prog) > 3 {
+		if d, ok := prog[3].([]any); ok {
+			decls = d
+		}
+	}
+
+	goImports := e.registerImports(imports)
+
+	bodyW := NewWriter()
+	saved := e.w
+	e.w = bodyW
+	for _, d := range decls {
+		e.emitDecl(d)
+	}
+	e.w = saved
+
+	e.w.Line("package ", pkg)
+	e.w.Line("")
+	e.writeImports(goImports)
+
+	if e.needsRange {
+		e.emitRangeHelper()
+	}
+
+	e.w.Raw(bodyW.String())
+	return e.w.String(), e.Errors
+}
+
+func (e *GoEmitter) registerImports(imports []string) []string {
+	seen := map[string]bool{}
+	var clean []string
+
+	for _, im := range imports {
+		if im == "" {
+			continue
+		}
+		key := strings.TrimPrefix(im, "std/")
+		entry, ok := stdlib[key]
+		if !ok {
+			if strings.HasPrefix(im, "std/") {
+				e.err("unknown stdlib package %q", im)
+			}
+			continue
+		}
+		if !seen[entry.path] {
+			seen[entry.path] = true
+			clean = append(clean, entry.path)
+		}
+		e.pkgs[lastSeg(key)] = entry
+	}
+	return clean
+}
+
+func (e *GoEmitter) writeImports(clean []string) {
+	if len(clean) == 0 {
+		return
+	}
+	if len(clean) == 1 {
+		e.w.Line(`import "`, clean[0], `"`)
+	} else {
+		e.w.Line("import (")
+		e.w.Indented(func() {
+			for _, im := range clean {
+				e.w.Line(`"`, im, `"`)
+			}
+		})
+		e.w.Line(")")
+	}
+	e.w.Line("")
+}
+
+func (e *GoEmitter) emitRangeHelper() {
+	e.w.Block("func __range(lo, hi int) []int {", func() {
+	e.w.Block("if hi < lo {", func() {
+	e.w.Line("return []int{}")
+	})
+	e.w.Line("out := make([]int, 0, hi-lo+1)")
+	e.w.Block("for i := lo; i <= hi; i++ {", func() {
+	e.w.Line("out = append(out, i)")
+	})
+	e.w.Line("return out")
+	})
+	e.w.Line("")
 }
 
 // ---------- declarations ----------
 
-func (g *GoEmitter) emitDecl(d any) {
-	dd := d.([]any)
-	switch dd[0].(string) {
+func (e *GoEmitter) emitDecl(d any) {
+	n, ok := d.([]any)
+	if !ok || len(n) == 0 {
+		return
+	}
+	switch n[0].(string) {
 		case "Struct":
-			g.emitStruct(dd)
-		case "Fn":
-			g.emitFn(dd)
+			e.emitStruct(n)
 		case "Interface":
-			g.emitInterface(dd)
+			e.emitInterface(n)
+		case "Fn":
+			e.emitFn(n)
+		default:
+			e.err("unknown decl %q", n[0])
 	}
 }
 
-func (g *GoEmitter) emitStruct(d []any) {
-	name := d[1].(string)
-	fields := d[2].([]any)
-	g.w(fmt.Sprintf("type %s struct {", name))
-	g.push()
+func (e *GoEmitter) emitStruct(n []any) {
+	name := n[1].(string)
+	fields := n[2].([]any)
+	e.w.Block("type "+name+" struct {", func() {
 	for _, f := range fields {
 		ff := f.([]any)
-		g.w(fmt.Sprintf("%s %s", ff[1].(string), g.goType(ff[2])))
+		e.w.Line(ff[1].(string), " ", e.goType(ff[2]))
 	}
-	g.pop()
-	g.w("}")
+	})
+	e.w.Line("")
 }
 
-func (g *GoEmitter) emitInterface(d []any) {
-	name := d[1].(string)
-	methods := d[2].([]any)
-	g.w(fmt.Sprintf("type %s interface {", name))
-	g.push()
+func (e *GoEmitter) emitInterface(n []any) {
+	name := n[1].(string)
+	methods := n[2].([]any)
+	e.w.Block("type "+name+" interface {", func() {
 	for _, m := range methods {
-		sig := m.([]any)
-		mname := sig[1].(string)
-		params := sig[2].([]any)
-		ret := sig[3]
-
-		var parts []string
+		mm := m.([]any)
+		mname := mm[1].(string)
+		params := mm[2].([]any)
+		retNode := mm[3]
+		var errNode any
+		if len(mm) > 4 {
+			errNode = mm[4]
+		}
+		var ps []string
 		for _, p := range params {
 			pp := p.([]any)
-			pname := pp[1].(string)
-			pty := pp[2]
-			variadic := pp[3].(bool)
-			t := g.goType(pty)
-			if variadic {
-				t = "..." + t
-			}
-			parts = append(parts, fmt.Sprintf("%s %s", pname, t))
+			ps = append(ps, pp[1].(string)+" "+e.goType(pp[2]))
 		}
-		retGo := ""
-		if ret != nil {
-			retGo = g.goType(ret)
+		sig := mname + "(" + strings.Join(ps, ", ") + ")"
+		switch {
+			case retNode != nil && errNode != nil:
+				sig += " (" + e.goType(retNode) + ", error)"
+			case retNode != nil:
+				sig += " " + e.goType(retNode)
+			case errNode != nil:
+				sig += " error"
 		}
-		line := fmt.Sprintf("%s(%s) %s", mname, strings.Join(parts, ", "), retGo)
-		g.w(strings.TrimRight(line, " "))
+		e.w.Line(sig)
 	}
-	g.pop()
-	g.w("}")
+	})
+	e.w.Line("")
 }
 
-func (g *GoEmitter) emitFn(d []any) {
-	name := d[1].(string)
-	params := d[2].([]any)
-	ret := d[3]
-	body := d[4]
-	recv := d[5]
+func (e *GoEmitter) emitFn(n []any) {
+	name := n[1].(string)
+	params := n[2].([]any)
+	retNode := n[3]
+	body := n[4]
+	recv := n[5]
+	var errNode any
+	if len(n) > 6 {
+		errNode = n[6]
+	}
 
-	var parts []string
+	var header strings.Builder
+	header.WriteString("func ")
+	if recv != nil {
+		recvName, _ := recv.(string)
+		header.WriteString("(self ")
+		header.WriteString(recvName)
+		header.WriteString(") ")
+		if len(params) > 0 {
+			params = params[1:]
+		}
+	}
+	header.WriteString(name)
+	header.WriteString("(")
+	var ps []string
 	for _, p := range params {
 		pp := p.([]any)
 		pname := pp[1].(string)
-		pty := pp[2]
-		variadic := pp[3].(bool)
-		if recv != nil && pname == "self" {
-			continue
+		variadic := false
+		if v, ok := pp[3].(bool); ok {
+			variadic = v
 		}
-		t := g.goType(pty)
+		pty := e.goType(pp[2])
 		if variadic {
-			t = "..." + t
+			pty = "..." + pty
 		}
-		parts = append(parts, fmt.Sprintf("%s %s", pname, t))
+		ps = append(ps, pname+" "+pty)
 	}
+	header.WriteString(strings.Join(ps, ", "))
+	header.WriteString(")")
 
-	retGo := ""
-	if ret != nil {
-		retGo = g.goType(ret)
+	switch {
+		case retNode != nil && errNode != nil:
+			header.WriteString(" (")
+			header.WriteString(e.goType(retNode))
+			header.WriteString(", error)")
+		case retNode != nil:
+			header.WriteString(" ")
+			header.WriteString(e.goType(retNode))
+		case errNode != nil:
+			header.WriteString(" error")
 	}
+	header.WriteString(" {")
 
-	recvPrefix := ""
-	if recv != nil {
-		recvPrefix = fmt.Sprintf("(self *%s) ", recv.(string))
-	}
+	savedRet := e.fnRetTy
+	savedErr := e.fnErrTy
+	savedErrVar := e.errVar
+	savedRename := e.errRename
+	savedSlots := e.fnRetSlots
+	e.fnRetTy = retNode
+	e.fnErrTy = errNode
+	e.errVar = ""
+	e.errRename = ""
+	e.fnRetSlots = returnSlotCount(retNode)
 
-	head := fmt.Sprintf("func %s%s(%s)", recvPrefix, name, strings.Join(parts, ", "))
-	if retGo != "" {
-		head += " " + retGo
-	}
-	g.w(head + " {")
-	g.push()
-	g.emitBlockStmts(body)
-	g.pop()
-	g.w("}")
+	e.w.Block(header.String(), func() {
+		e.emitBlockBody(body)
+	})
+	e.w.Line("")
+
+	e.fnRetTy = savedRet
+	e.fnErrTy = savedErr
+	e.errVar = savedErrVar
+	e.errRename = savedRename
+	e.fnRetSlots = savedSlots
 }
 
 // ---------- statements ----------
 
-func (g *GoEmitter) emitBlockStmts(block any) {
-	stmts := block.([]any)[1].([]any)
-	for i, s := range stmts {
-		g.emitStmt(s, stmts, i)
+func (e *GoEmitter) emitBlockBody(block any) {
+	if block == nil {
+		return
+	}
+	n, ok := block.([]any)
+	if !ok || n[0].(string) != "HBlock" {
+		e.err("expected HBlock, got %v", block)
+		return
+	}
+	for _, s := range n[1].([]any) {
+		e.emitStmt(s)
 	}
 }
 
-func (g *GoEmitter) emitStmt(s any, siblings []any, idx int) {
-	n := s.([]any)
+func (e *GoEmitter) inlineStmt(s any) string {
+	scratch := NewWriter()
+	saved := e.w
+	e.w = scratch
+	e.emitStmt(s)
+	e.w = saved
+	return strings.TrimRight(scratch.String(), "\n")
+}
+
+func (e *GoEmitter) emitStmt(s any) {
+	n, ok := s.([]any)
+	if !ok || len(n) == 0 {
+		return
+	}
 	switch n[0].(string) {
+		case "HBlock":
+			e.w.Block("{", func() {
+			e.emitBlockBody(s)
+			})
+
 		case "HLet":
-			name := n[1].(string)
-			ty := n[2]
-			expr := n[3]
-			if ty != nil {
-				g.w(fmt.Sprintf("var %s %s", name, g.goType(ty)))
-				if expr != nil {
-					g.w(fmt.Sprintf("%s = %s", name, g.emitExpr(expr)))
+			e.emitLet(n)
+
+		case "HErrLet":
+			e.emitErrLet(n)
+
+		case "HMultiLet":
+			names := n[1].([]string)
+			expr := n[2]
+			var lhs []string
+			allBlank := true
+			for _, nm := range names {
+				lhs = append(lhs, nm)
+				if nm != "_" {
+					allBlank = false
 				}
-			} else {
-				g.w(fmt.Sprintf("%s := %s", name, g.emitExpr(expr)))
 			}
-			if !strings.HasPrefix(name, "__") && !g.usedAfter(name, siblings, idx) {
-				g.w(fmt.Sprintf("_ = %s", name))
+			if allBlank {
+				e.w.Line("_ = ", e.emitExpr(expr))
+				return
 			}
+			e.w.Line(strings.Join(lhs, ", "), " := ", e.emitExpr(expr))
 
 		case "HAssign":
-			tgt := n[1]
-			expr := n[2]
-			g.w(fmt.Sprintf("%s = %s", g.emitExpr(tgt), g.emitExpr(expr)))
+			e.w.Line(e.emitExpr(n[1]), " = ", e.emitExpr(n[2]))
 
 		case "HExprStmt":
-			g.w(g.emitExpr(n[1]))
+			e.w.Line(e.emitExpr(n[1]))
 
 		case "HReturn":
-			expr := n[1]
-			if expr == nil {
-				g.w("return")
-			} else {
-				g.w(fmt.Sprintf("return %s", g.emitExpr(expr)))
-			}
+			e.emitReturn(n)
 
 		case "HIf":
-			g.emitIf(n)
+			e.emitIfChain(n, true)
 
 		case "HWhile":
-			cond := n[1]
-			body := n[2]
-			g.w(fmt.Sprintf("for %s {", g.emitExpr(cond)))
-			g.push()
-			g.emitBlockStmts(body)
-			g.pop()
-			g.w("}")
+			e.w.Block("for "+e.emitExpr(n[1])+" {", func() {
+			e.emitBlockBody(n[2])
+			})
+
+		case "HFor":
+			e.emitFor(n)
 
 		case "HSwitch":
-			cases := n[1].([]any)
-			defaultBody := n[2]
-			g.w("switch {")
-			g.push()
-			for _, c := range cases {
-				cs := c.([]any)
-				cond := cs[1]
-				body := cs[2]
-				g.w(fmt.Sprintf("case %s:", g.emitExpr(cond)))
-				g.push()
-				g.emitBlockStmts(body)
-				g.pop()
-			}
-			if defaultBody != nil {
-				g.w("default:")
-				g.push()
-				g.emitBlockStmts(defaultBody)
-				g.pop()
-			}
-			g.pop()
-			g.w("}")
+			e.emitSwitch(n)
 
 		case "HBreak":
-			g.w("break")
-
-		case "HContinue":
-			g.w("continue")
+			e.w.Line("break")
 
 		default:
-			panic(fmt.Sprintf("emit_stmt: %s", n[0].(string)))
+			e.err("unknown statement %q", n[0])
 	}
 }
 
-func (g *GoEmitter) emitIf(s []any) {
-	cond := s[1]
-	thenB := s[2]
-	elseB := s[3]
+func (e *GoEmitter) emitLet(n []any) {
+	name := n[1].(string)
+	tyNode := n[2]
+	expr := n[3]
 
-		g.w(fmt.Sprintf("if %s {", g.emitExpr(cond)))
-		g.push()
-		g.emitBlockStmts(thenB)
-		g.pop()
-
-		for elseB != nil {
-			eb := elseB.([]any)
-			stmts := eb[1].([]any)
-			if len(stmts) == 1 && stmts[0].([]any)[0].(string) == "HIf" {
-				inner := stmts[0].([]any)
-				iCond := inner[1]
-				iThen := inner[2]
-				iElse := inner[3]
-				g.w(fmt.Sprintf("} else if %s {", g.emitExpr(iCond)))
-				g.push()
-				g.emitBlockStmts(iThen)
-				g.pop()
-				elseB = iElse
-					continue
-			}
-			g.w("} else {")
-			g.push()
-			g.emitBlockStmts(elseB)
-			g.pop()
-			break
+	if name == "_" {
+		if expr != nil {
+			e.w.Line("_ = ", e.emitExpr(expr))
 		}
-		g.w("}")
+		return
+	}
+	switch {
+		case expr == nil && tyNode != nil:
+			e.w.Line("var ", name, " ", e.goType(tyNode))
+		case expr != nil && tyNode == nil:
+			if isHNil(expr) {
+				e.w.Line("var ", name, " any = nil")
+			} else {
+				e.w.Line(name, " := ", e.emitExpr(expr))
+			}
+		case expr != nil && tyNode != nil:
+			e.w.Line("var ", name, " ", e.goType(tyNode), " = ", e.emitExpr(expr))
+		default:
+			e.err("HLet %q: no type and no initializer", name)
+	}
 }
 
-// ---------- "is this local used later in the block?" ----------
+// emitErrLet renders `let x = <expr> else { <els> }` as Go error
+// handling. Each let-else gets a unique __errN name so nested cases
+// don't collide. Inside the else block, the source identifier `err`
+// is rewritten to that same __errN so the user can print it.
+func (e *GoEmitter) emitErrLet(n []any) {
+	name := n[1].(string)
+	expr := n[3]
+	els := n[4].([]any)
 
-func (g *GoEmitter) usedAfter(name string, stmts []any, idx int) bool {
-	for j := idx + 1; j < len(stmts); j++ {
-		if g.stmtMentions(stmts[j], name) {
-			return true
+	e.errCounter++
+	errVar := fmt.Sprintf("__err%d", e.errCounter)
+
+	e.w.Line(name, ", ", errVar, " := ", e.emitExpr(expr))
+	e.w.Block("if "+errVar+" != nil {", func() {
+	savedEV := e.errVar
+	savedRename := e.errRename
+	e.errVar = errVar
+	e.errRename = errVar
+	e.emitBlockBody(els)
+	e.errVar = savedEV
+	e.errRename = savedRename
+	})
+}
+
+// emitReturn shapes a return statement according to the current
+// function:
+//
+//   - void, non-fallible:            `return`
+//   - T, non-fallible:               `return <expr>`
+//   - T ! error:                     `return <expr>, nil`
+//   - T ! error, explicit:           `return <expr>, <err>`
+//   - bare `return` in fallible:     `return <zeros>, nil`
+//   - bare `return` inside else:     `return <zeros>, __errN`
+func (e *GoEmitter) emitReturn(n []any) {
+	exprs := n[1].([]any)
+
+	if len(exprs) == 0 {
+		switch {
+			case e.fnErrTy != nil && e.errVar != "":
+				zs := e.zeroValues()
+				parts := append(append([]string{}, zs...), e.errVar)
+				e.w.Line("return ", strings.Join(parts, ", "))
+			case e.fnErrTy != nil:
+				zs := e.zeroValues()
+				if len(zs) == 0 {
+					e.w.Line("return nil")
+				} else {
+					parts := append(append([]string{}, zs...), "nil")
+					e.w.Line("return ", strings.Join(parts, ", "))
+				}
+			default:
+				e.w.Line("return")
+		}
+		return
+	}
+
+	var parts []string
+	for _, ex := range exprs {
+		parts = append(parts, e.emitExpr(ex))
+	}
+
+	if e.fnErrTy != nil {
+		if len(exprs) == e.fnRetSlots+1 {
+			e.w.Line("return ", strings.Join(parts, ", "))
+			return
+		}
+		parts = append(parts, "nil")
+	}
+	e.w.Line("return ", strings.Join(parts, ", "))
+}
+
+func (e *GoEmitter) emitIfChain(n []any, firstLine bool) {
+	cond := e.emitExpr(n[1])
+	thenBlock := n[2].([]any)
+	els := n[3]
+
+	header := "if " + cond + " {"
+	if firstLine {
+		e.w.Line(header)
+	} else {
+		e.w.LineNoIndent(header)
+	}
+	e.w.Indented(func() { e.emitBlockBody(thenBlock) })
+
+	if els == nil {
+		e.w.Line("}")
+		return
+	}
+
+	if elsN, ok := els.([]any); ok && elsN[0].(string) == "HBlock" {
+		inner := elsN[1].([]any)
+		if len(inner) == 1 {
+			first := inner[0].([]any)
+			if first[0].(string) == "HIf" {
+				e.w.Raw(strings.Repeat("\t", e.w.indent))
+				e.w.Raw("} else ")
+				e.emitIfChain(first, false)
+				return
+			}
 		}
 	}
-	return false
+
+	e.w.Line("} else {")
+	e.w.Indented(func() { e.emitBlockBody(els) })
+	e.w.Line("}")
 }
 
-func (g *GoEmitter) stmtMentions(s any, name string) bool {
-	n := s.([]any)
-	switch n[0].(string) {
-		case "HLet":
-			return n[3] != nil && g.exprMentions(n[3], name)
-		case "HAssign":
-			return g.exprMentions(n[1], name) || g.exprMentions(n[2], name)
-		case "HExprStmt":
-			return g.exprMentions(n[1], name)
-		case "HReturn":
-			return n[1] != nil && g.exprMentions(n[1], name)
-		case "HIf":
-			c := n[1]
-			t := n[2]
-			e := n[3]
-			if g.exprMentions(c, name) {
-				return true
-			}
-			for _, x := range t.([]any)[1].([]any) {
-				if g.stmtMentions(x, name) {
-					return true
-				}
-			}
-			if e != nil {
-				for _, x := range e.([]any)[1].([]any) {
-					if g.stmtMentions(x, name) {
-						return true
-					}
-				}
-			}
-			return false
-		case "HWhile":
-			c := n[1]
-			b := n[2]
-			if g.exprMentions(c, name) {
-				return true
-			}
-			for _, x := range b.([]any)[1].([]any) {
-				if g.stmtMentions(x, name) {
-					return true
-				}
-			}
-			return false
+func (e *GoEmitter) emitFor(n []any) {
+	varName := n[1].(string)
+	init := e.emitExpr(n[2])
+	cond := e.emitExpr(n[3])
+	post := e.inlineStmt(n[4])
+	body := n[5].([]any)
 
-		case "HSwitch":
-			cases := n[1].([]any)
-			defaultBody := n[2]
-			for _, c := range cases {
-				cs := c.([]any)
-				if g.exprMentions(cs[1], name) {
-					return true
-				}
-				for _, x := range cs[2].([]any)[1].([]any) {
-					if g.stmtMentions(x, name) {
-						return true
-					}
-				}
-			}
-			if defaultBody != nil {
-				for _, x := range defaultBody.([]any)[1].([]any) {
-					if g.stmtMentions(x, name) {
-						return true
-					}
-				}
-			}
-			return false
-	}
-	return false
+	e.w.Line("for ", varName, " := ", init, "; ", cond, "; ", post, " {")
+	e.w.Indented(func() { e.emitBlockBody(body) })
+	e.w.Line("}")
 }
 
-func (g *GoEmitter) exprMentions(e any, name string) bool {
-	if e == nil {
-		return false
-	}
-	n := e.([]any)
-	switch n[0].(string) {
-		case "HIdent":
-			return n[1].(string) == name
-		case "HInt", "HFloat", "HByte", "HStr", "HBool":
-			return false
-		case "HUn":
-			return g.exprMentions(n[2], name)
-		case "HBin":
-			return g.exprMentions(n[2], name) || g.exprMentions(n[3], name)
-		case "HCall":
-			if g.exprMentions(n[1], name) {
-				return true
-			}
-			for _, a := range n[2].([]any) {
-				if g.exprMentions(a, name) {
-					return true
+func (e *GoEmitter) emitSwitch(n []any) {
+	cases := n[1].([]any)
+		defaultBody := n[2]
+			e.w.Line("switch {")
+			e.w.Indented(func() {
+				for _, ca := range cases {
+					cn := ca.([]any)
+					e.w.Line("case ", e.emitExpr(cn[1]), ":")
+					e.w.Indented(func() { e.emitBlockBody(cn[2]) })
 				}
-			}
-			return false
-		case "HSel":
-			return g.exprMentions(n[1], name)
-		case "HIndex":
-			return g.exprMentions(n[1], name) || g.exprMentions(n[2], name)
-		case "HSlice":
-			return g.exprMentions(n[1], name) ||
-			g.exprMentions(n[2], name) ||
-			g.exprMentions(n[3], name)
-		case "HStructLit":
-			for _, f := range n[2].([]any) {
-				ff := f.([]any)
-				if g.exprMentions(ff[2], name) {
-					return true
+				if defaultBody != nil {
+					e.w.Line("default:")
+					e.w.Indented(func() { e.emitBlockBody(defaultBody) })
 				}
-			}
-			return false
-		case "HListLit", "HSetLit":
-			for _, x := range n[2].([]any) {
-				if g.exprMentions(x, name) {
-					return true
-				}
-			}
-			return false
-		case "HSpread":
-			return g.exprMentions(n[1], name)
-	}
-	return false
+			})
+			e.w.Line("}")
 }
 
 // ---------- expressions ----------
 
-func (g *GoEmitter) emitExpr(e any) string {
-	n := e.([]any)
+func (e *GoEmitter) emitExpr(expr any) string {
+	if expr == nil {
+		return ""
+	}
+	n, ok := expr.([]any)
+	if !ok {
+		e.err("expected expression node, got %T", expr)
+		return "nil"
+	}
 	switch n[0].(string) {
 		case "HInt":
-			return fmt.Sprintf("%v", n[1])
+			return strconv.Itoa(n[1].(int))
+
 		case "HFloat":
 			return formatFloat(n[1].(float64))
+
 		case "HByte":
-			return fmt.Sprintf("byte(%v)", n[1])
+			return fmt.Sprintf("byte(%d)", n[1])
+
 		case "HStr":
-			return "\"" + escapeStr(n[1].(string)) + "\""
+			return strconv.Quote(n[1].(string))
+
 		case "HBool":
 			if n[1].(bool) {
 				return "true"
 			}
 			return "false"
+
+		case "HNil":
+			return "nil"
+
 		case "HIdent":
-			return mangleIdent(n[1].(string))
+			name := n[1].(string)
+			// Inside a let-else else block, the source-level name
+			// `err` is rewritten to the emitter-side __errN.
+			if name == "err" && e.errRename != "" {
+				return e.errRename
+			}
+			if name == "__range" {
+				e.needsRange = true
+			}
+			return name
 
 		case "HUn":
-			op := n[1].(string)
-			return unopMap[op] + g.emitExpr(n[2])
+			return n[1].(string) + e.emitExpr(n[2])
 
 		case "HBin":
-			op := n[1].(string)
-			return fmt.Sprintf("%s %s %s",
-					   g.emitExpr(n[2]), binopMap[op], g.emitExpr(n[3]))
+			return "(" + e.emitExpr(n[2]) + " " + n[1].(string) + " " + e.emitExpr(n[3]) + ")"
 
 		case "HCall":
-			return g.emitCall(n[1], n[2].([]any))
+			return e.emitCall(n)
 
 		case "HSel":
-			return fmt.Sprintf("%s.%s", g.emitExpr(n[1]), n[2].(string))
+			return e.emitSel(n)
 
 		case "HIndex":
-			return fmt.Sprintf("%s[%s]", g.emitExpr(n[1]), g.emitExpr(n[2]))
+			return e.emitExpr(n[1]) + "[" + e.emitExpr(n[2]) + "]"
 
 		case "HSlice":
-			loS, hiS := "", ""
+			var lo, hi string
 			if n[2] != nil {
-				loS = g.emitExpr(n[2])
+				lo = e.emitExpr(n[2])
 			}
 			if n[3] != nil {
-				hiS = g.emitExpr(n[3])
+				hi = e.emitExpr(n[3])
 			}
-			return fmt.Sprintf("%s[%s:%s]", g.emitExpr(n[1]), loS, hiS)
+			return e.emitExpr(n[1]) + "[" + lo + ":" + hi + "]"
 
 		case "HStructLit":
 			name := n[1].(string)
 			var parts []string
 			for _, f := range n[2].([]any) {
 				ff := f.([]any)
-				parts = append(parts, fmt.Sprintf("%s: %s",
-								  ff[1].(string), g.emitExpr(ff[2])))
+				parts = append(parts, ff[1].(string)+": "+e.emitExpr(ff[2]))
 			}
-			return fmt.Sprintf("%s{%s}", name, strings.Join(parts, ", "))
+			return name + "{" + strings.Join(parts, ", ") + "}"
 
 		case "HListLit":
+			tyNode := n[1]
 			var parts []string
-			for _, x := range n[2].([]any) {
-				parts = append(parts, g.emitExpr(x))
+			for _, el := range n[2].([]any) {
+				parts = append(parts, e.emitExpr(el))
 			}
-			return fmt.Sprintf("%s{%s}", g.goType(n[1]), strings.Join(parts, ", "))
+			return e.goType(tyNode) + "{" + strings.Join(parts, ", ") + "}"
 
 		case "HSetLit":
-			elems := n[2].([]any)
-			if len(elems) == 0 {
-				return fmt.Sprintf("make(%s)", g.goType(n[1]))
-			}
+			tyNode := n[1]
 			var parts []string
-			for _, x := range elems {
-				parts = append(parts, fmt.Sprintf("%s: struct{}{}", g.emitExpr(x)))
+			for _, el := range n[2].([]any) {
+				parts = append(parts, e.emitExpr(el))
 			}
-			return fmt.Sprintf("%s{%s}", g.goType(n[1]), strings.Join(parts, ", "))
-
-		case "HSpread":
-			panic("HSpread outside a call")
+			return e.goType(tyNode) + "{" + strings.Join(parts, ", ") + "}"
 
 		case "HFnLit":
-			return g.emitFnLit(n)
+			return e.emitFnLit(n)
+
+		case "HSpread":
+			e.err("spread `...` used outside call arguments")
+			return e.emitExpr(n[1]) + "..."
 	}
-	panic(fmt.Sprintf("emit_expr: %s", n[0].(string)))
+
+	e.err("unknown expression %q", n[0])
+	return "nil"
 }
 
-func (g *GoEmitter) emitCall(fn any, args []any) string {
-	fnN := fn.([]any)
-
-	// conversions: string(x), int(x), byte(x), float(x)
-	if fnN[0].(string) == "HIdent" {
-		name := fnN[1].(string)
-		if conv, ok := convMap[name]; ok {
-			return fmt.Sprintf("%s(%s)", conv, g.emitExpr(args[0]))
-		}
-		switch name {
-			case "len":
-				return fmt.Sprintf("len(%s)", g.emitExpr(args[0]))
-			case "append":
-				return fmt.Sprintf("append(%s, %s)",
-						   g.emitExpr(args[0]), g.emitExpr(args[1]))
-		}
-	}
-
-	// fmt.println / fmt.print / fmt.printf
-	if fnN[0].(string) == "HSel" {
-		base := fnN[1].([]any)
-		if base[0].(string) == "HIdent" && base[1].(string) == "fmt" {
-			method := fnN[2].(string)
-			goName := method
-			switch method {
-				case "println":
-					goName = "Println"
-				case "printf":
-					goName = "Printf"
-				case "print":
-					goName = "Print"
-			}
-			var parts []string
-			for _, a := range args {
-				an := a.([]any)
-				if an[0].(string) == "HSpread" {
-					parts = append(parts, g.emitExpr(an[1])+"...")
-				} else {
-					parts = append(parts, g.emitExpr(a))
+func (e *GoEmitter) emitCall(n []any) string {
+	if id, ok := n[1].([]any); ok && len(id) == 2 {
+		if id[0].(string) == "HIdent" && id[1].(string) == "__range" {
+			args := n[2].([]any)
+			if len(args) == 2 {
+				lo, ok1 := constInt(args[0])
+				hi, ok2 := constInt(args[1])
+				if ok1 && ok2 {
+					return rangeLit(lo, hi)
 				}
 			}
-			return fmt.Sprintf("fmt.%s(%s)", goName, strings.Join(parts, ", "))
+			e.needsRange = true
 		}
 	}
 
-	callee := g.emitExpr(fn)
+	callee := e.emitExpr(n[1])
 	var parts []string
-	for _, a := range args {
+	for _, a := range n[2].([]any) {
 		an := a.([]any)
 		if an[0].(string) == "HSpread" {
-			parts = append(parts, g.emitExpr(an[1])+"...")
+			parts = append(parts, e.emitExpr(an[1])+"...")
 		} else {
-			parts = append(parts, g.emitExpr(a))
+			parts = append(parts, e.emitExpr(a))
 		}
 	}
-	return fmt.Sprintf("%s(%s)", callee, strings.Join(parts, ", "))
+	return callee + "(" + strings.Join(parts, ", ") + ")"
 }
 
-func (g *GoEmitter) emitFnLit(n []any) string {
-	params := n[1].([]any)
-	ret := n[2]
-	body := n[3]
+func (e *GoEmitter) emitSel(n []any) string {
+	base := e.emitExpr(n[1])
+	name := n[2].(string)
+	if entry, ok := e.pkgs[base]; ok {
+		if renamed, ok := entry.members[name]; ok {
+			name = renamed
+		}
+	}
+	return base + "." + name
+}
 
-	var parts []string
+func (e *GoEmitter) emitFnLit(n []any) string {
+	params := n[1].([]any)
+	retNode := n[2]
+	var errNode any
+	if len(n) > 3 {
+		errNode = n[3]
+	}
+	var body any
+	if len(n) > 4 {
+		body = n[4]
+	}
+
+	var sb strings.Builder
+	sb.WriteString("func(")
+	var ps []string
 	for _, p := range params {
 		pp := p.([]any)
-		pname := pp[1].(string)
-		pty := pp[2]
-		variadic := pp[3].(bool)
-		t := g.goType(pty)
+		variadic := false
+		if v, ok := pp[3].(bool); ok {
+			variadic = v
+		}
+		pty := e.goType(pp[2])
 		if variadic {
-			t = "..." + t
+			pty = "..." + pty
 		}
-		parts = append(parts, fmt.Sprintf("%s %s", pname, t))
+		ps = append(ps, pp[1].(string)+" "+pty)
 	}
+	sb.WriteString(strings.Join(ps, ", "))
+	sb.WriteString(")")
 
-	retGo := ""
-	if ret != nil {
-		retGo = g.goType(ret)
+	switch {
+		case retNode != nil && errNode != nil:
+			sb.WriteString(" (")
+			sb.WriteString(e.goType(retNode))
+			sb.WriteString(", error)")
+		case retNode != nil:
+			sb.WriteString(" ")
+			sb.WriteString(e.goType(retNode))
+		case errNode != nil:
+			sb.WriteString(" error")
 	}
+	sb.WriteString(" {\n")
 
-	head := fmt.Sprintf("func(%s)", strings.Join(parts, ", "))
-	if retGo != "" {
-		head += " " + retGo
-	}
+	bodyW := NewWriter()
+	bodyW.indent = e.w.indent + 1
+	saved := e.w
+	savedRet := e.fnRetTy
+	savedErr := e.fnErrTy
+	savedErrVar := e.errVar
+	savedRename := e.errRename
+	savedSlots := e.fnRetSlots
+	e.w = bodyW
+	e.fnRetTy = retNode
+	e.fnErrTy = errNode
+	e.errVar = ""
+	e.errRename = ""
+	e.fnRetSlots = returnSlotCount(retNode)
+	e.emitBlockBody(body)
+	e.fnRetTy = savedRet
+	e.fnErrTy = savedErr
+	e.errVar = savedErrVar
+	e.errRename = savedRename
+	e.fnRetSlots = savedSlots
+	e.w = saved
 
-	// Render body into a sub-buffer.
-	savedBuf := g.buf
-	savedIndent := g.indent
-	g.buf = nil
-	g.indent++
-	g.emitBlockStmts(body)
-	bodyLines := g.buf
-	g.buf = savedBuf
-	g.indent = savedIndent
-
-	if len(bodyLines) == 0 {
-		return head + " {}"
-	}
-	inner := strings.Join(bodyLines, "\n")
-	clos := strings.Repeat("    ", g.indent) + "}"
-	return head + " {\n" + inner + "\n" + clos
-}
-
-// ---------- helpers ----------
-
-func mangleIdent(name string) string {
-	if reserved[name] {
-		return name + "_"
-	}
-	return name
-}
-
-func escapeStr(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch r {
-			case '\\':
-				b.WriteString("\\\\")
-			case '"':
-				b.WriteString("\\\"")
-			case '\n':
-				b.WriteString("\\n")
-			case '\t':
-				b.WriteString("\\t")
-			case '\r':
-				b.WriteString("\\r")
-			default:
-				b.WriteRune(r)
-		}
-	}
-	return b.String()
+	sb.WriteString(bodyW.String())
+	sb.WriteString(strings.Repeat("\t", e.w.indent))
+	sb.WriteString("}")
+	return sb.String()
 }
 
 func formatFloat(f float64) string {
 	s := strconv.FormatFloat(f, 'g', -1, 64)
-	if !strings.ContainsAny(s, ".eE") {
+	if !strings.ContainsAny(s, ".eEnN") {
 		s += ".0"
 	}
 	return s
 }
 
-func EmitGo(prog []any) string {
-	return New(prog).Emit()
+func isHNil(e any) bool {
+	n, ok := e.([]any)
+	return ok && len(n) > 0 && n[0].(string) == "HNil"
 }

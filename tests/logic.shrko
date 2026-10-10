@@ -4,7 +4,7 @@ import {
   "std/fmt"
 }
 
-fn main() {
+func main() {
   let a = 5
   let b = 10
   fmt.println(a > 0 && b > 0)

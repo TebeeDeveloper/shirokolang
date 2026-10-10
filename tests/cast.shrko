@@ -4,7 +4,7 @@ import {
   "std/fmt"
 }
 
-fn main() {
+func main() {
   const PI = 3.14
   let x = int(PI)
   let y = float(10)

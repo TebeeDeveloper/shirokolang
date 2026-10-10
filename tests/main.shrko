@@ -2,6 +2,6 @@ package main
 import {
   "std/fmt"
 }
-fn main() {
+func main() {
   fmt.println("Hello, ShirokoLang!")
 }

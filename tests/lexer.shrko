@@ -21,14 +21,14 @@ struct Lexer {
 
 // ---------- character helpers ----------
 
-fn (Lexer) peek() byte {
+func (Lexer) peek() byte {
     if self.pos >= len(self.src) {
         return 0
     }
     return self.src[self.pos]
 }
 
-fn (Lexer) advance() byte {
+func (Lexer) advance() byte {
     let c = self.peek()
     if c == 0 {
         return 0
@@ -38,30 +38,30 @@ fn (Lexer) advance() byte {
     return c
 }
 
-fn (Lexer) isDigit(c byte) bool {
+func (Lexer) isDigit(c byte) bool {
     return c >= '0' && c <= '9'
 }
 
-fn (Lexer) isAlpha(c byte) bool {
+func (Lexer) isAlpha(c byte) bool {
     return (c >= 'a' && c <= 'z')
         || (c >= 'A' && c <= 'Z')
         || c == '_'
 }
 
-fn (Lexer) isSpace(c byte) bool {
+func (Lexer) isSpace(c byte) bool {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
 // ---------- token emission ----------
 
-fn (Lexer) push(kind string, value string, line int, col int) {
+func (Lexer) push(kind string, value string, line int, col int) {
     let t = Token{kind: kind, value: value, line: line, col: col}
     self.toks = append(self.toks, t)
 }
 
 // ---------- scanners ----------
 
-fn (Lexer) scanNumber() string {
+func (Lexer) scanNumber() string {
     let start = self.pos
     for self.peek() != 0 && self.isDigit(self.peek()) {
         self.advance()
@@ -69,7 +69,7 @@ fn (Lexer) scanNumber() string {
     return self.src[start:self.pos]
 }
 
-fn (Lexer) scanIdent() string {
+func (Lexer) scanIdent() string {
     let start = self.pos
     for self.peek() != 0 && (self.isAlpha(self.peek()) || self.isDigit(self.peek())) {
         self.advance()
@@ -79,7 +79,7 @@ fn (Lexer) scanIdent() string {
 
 // ---------- main loop ----------
 
-fn (Lexer) run() []Token {
+func (Lexer) run() []Token {
     for self.pos < len(self.src) {
         let c = self.peek()
 
@@ -111,7 +111,7 @@ fn (Lexer) run() []Token {
 
 // ---------- entry point ----------
 
-fn main() {
+func main() {
     let src = "let x = 1 + 2"
     let lx = Lexer{src: src, pos: 0, line: 1, col: 1, toks: []Token{}}
     let toks = lx.run()

@@ -13,7 +13,7 @@ type HinhVuong struct {
 }
 
 func (self *HinhVuong) area() float64 {
-	return self.dai * self.dai
+	return float64(self.dai * self.dai)
 }
 
 func main() {

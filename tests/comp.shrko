@@ -4,11 +4,11 @@ import {
     "std/fmt"
 }
 
-fn myFunc(s ...any) {
+func myFunc(s ...any) {
   fmt.println(s...)
 }
 
-fn main() {
+func main() {
     let ds = []int{1..10}
     fmt.println(ds)
 
