@@ -1,0 +1,22 @@
+package main
+
+import {
+  "std/fmt"
+}
+
+func main() {
+  let x = 7
+
+  match x {
+    10 => { fmt.println("ten") }
+    5..9 => { fmt.println("range 5-9") }
+    1..5 => fmt.println("range 4-9")
+    _ => { fmt.println("other") }
+  }
+
+  match x {
+    1 => fmt.println("one")
+    7 => fmt.println("seven")
+    _ => fmt.println("nope")
+  }
+}
