@@ -1,0 +1,12 @@
+package main
+
+import {
+  "std/fmt"
+}
+
+func main() {
+  let cong = fn(a, b int) int {
+    return a + b
+  }
+  fmt.println(cong(3, 4))
+}

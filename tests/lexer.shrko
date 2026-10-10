@@ -1,0 +1,310 @@
+package lexer
+
+import {
+    "std/fmt"
+    "std/strings"
+}
+
+let Keywords = map[string]bool{
+    "package": true, "import": true, "interface": true, "struct": true,
+    "func": true, "let": true, "const": true, "for": true, "range": true,
+    "iter": true, "if": true, "else": true, "return": true,
+    "match": true, "map": true,
+    "break": true, "continue": true,
+}
+
+struct Token {
+    kind string
+    value any
+    line int
+    col int
+}
+
+func newToken(kind string, value any, line int, col int) -> Token {
+    return Token{kind: kind, value: value, line: line, col: col}
+}
+
+func Token.getKind() -> string {
+    return self.kind
+}
+
+func Token.describe() -> string {
+    return fmt.sprintf("%s(%q) @ %d:%d\n", self.kind, self.value, self.line, self.col)
+}
+
+struct Lexer {
+    src string
+    pos int
+    line int
+    col int
+    tokens []Token
+}
+
+func newLexer(src string) -> Lexer {
+    return Lexer{src: src, pos: 0, line: 1, col: 1, tokens: []Token{}}
+}
+
+// ---------- character access ----------
+
+func Lexer.atEnd() -> bool {
+    return self.pos >= len(self.src)
+}
+
+func Lexer.peek() -> byte {
+    if self.atEnd() {
+        return '\0'
+    }
+    return self.src[self.pos]
+}
+
+func Lexer.peekAt(offset int) -> byte {
+    if self.pos + offset >= len(self.src) {
+        return '\0'
+    }
+    return self.src[self.pos + offset]
+}
+
+func Lexer.advance() -> byte {
+    if self.atEnd() {
+        return '\0'
+    }
+    let c = self.src[self.pos]
+    self.pos++
+    if c == '\n' {
+        self.line++
+        self.col = 1
+    } else {
+        self.col++
+    }
+    return c
+}
+
+// ---------- character classes ----------
+
+func Lexer.isDigit(c byte) -> bool {
+    return c >= '0' && c <= '9'
+}
+
+func Lexer.isAlpha(c byte) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+func Lexer.isAlphaNum(c byte) -> bool {
+    return self.isAlpha(c) || self.isDigit(c)
+}
+
+// ---------- whitespace and comments ----------
+
+func Lexer.skipWhitespace() {
+    for !self.atEnd() {
+        let c = self.peek()
+        if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+            self.advance()
+        } else if c == '/' && self.peekAt(1) == '/' {
+            for !self.atEnd() && self.peek() != '\n' {
+                self.advance()
+            }
+        } else if c == '/' && self.peekAt(1) == '*' {
+            self.advance()
+            self.advance()
+            for !self.atEnd() {
+                if self.peek() == '*' && self.peekAt(1) == '/' {
+                    self.advance()
+                    self.advance()
+                    break
+                }
+                self.advance()
+            }
+        } else {
+            break
+        }
+    }
+}
+
+// ---------- token readers ----------
+
+func Lexer.readIdentifier(startLine int, startCol int) -> Token {
+    let start = self.pos
+    for !self.atEnd() && self.isAlphaNum(self.peek()) {
+        self.advance()
+    }
+    let value = self.src[start:self.pos]
+    if Keywords[value] {
+        return newToken(strings.to_upper(value), value, startLine, startCol)
+    }
+    return newToken("IDENT", value, startLine, startCol)
+}
+
+func Lexer.readNumber(startLine int, startCol int) -> Token {
+    let start = self.pos
+    for !self.atEnd() && self.isDigit(self.peek()) {
+        self.advance()
+    }
+    let isFloat = false
+    if !self.atEnd() && self.peek() == '.' && self.isDigit(self.peekAt(1)) {
+        isFloat = true
+        self.advance()
+        for !self.atEnd() && self.isDigit(self.peek()) {
+            self.advance()
+        }
+    }
+    let value = self.src[start:self.pos]
+    if isFloat {
+        return newToken("FLOAT", value, startLine, startCol)
+    }
+    return newToken("INT", value, startLine, startCol)
+}
+
+func Lexer.readString(startLine int, startCol int) -> Token {
+    self.advance()
+    let start = self.pos
+    for !self.atEnd() && self.peek() != '"' {
+        if self.peek() == '\\' {
+            self.advance()
+        }
+        self.advance()
+    }
+    let value = self.src[start:self.pos]
+    if !self.atEnd() {
+        self.advance()
+    }
+    return newToken("STRING", value, startLine, startCol)
+}
+
+func Lexer.readChar(startLine int, startCol int) -> Token {
+    self.advance()
+    let value = 0
+    if !self.atEnd() {
+        if self.peek() == '\\' {
+            self.advance()
+            let esc = self.peek()
+            self.advance()
+            if esc == 'n' {
+                value = 10
+            } else if esc == 't' {
+                value = 9
+            } else if esc == 'r' {
+                value = 13
+            } else if esc == '0' {
+                value = 0
+            } else if esc == '\\' {
+                value = 92
+            } else if esc == '\'' {
+                value = 39
+            } else if esc == '"' {
+                value = 34
+            }
+        } else {
+            value = int(self.peek())
+            self.advance()
+        }
+    }
+    if !self.atEnd() && self.peek() == '\'' {
+        self.advance()
+    }
+    return newToken("BYTE", value, startLine, startCol)
+}
+
+// ---------- symbol matching ----------
+
+func Lexer.matchSymbol() -> string {
+    let c  = self.peek()
+    let c1 = self.peekAt(1)
+    let c2 = self.peekAt(2)
+
+    // 3-char
+    if c == '.' && c1 == '.' && c2 == '.' {
+        return "..."
+    }
+
+    // 2-char
+    if c == '=' && c1 == '>' { return "=>" }
+    if c == '=' && c1 == '=' { return "==" }
+    if c == '!' && c1 == '=' { return "!=" }
+    if c == '<' && c1 == '=' { return "<=" }
+    if c == '>' && c1 == '=' { return ">=" }
+    if c == '&' && c1 == '&' { return "&&" }
+    if c == '|' && c1 == '|' { return "||" }
+    if c == '-' && c1 == '>' { return "->" }
+    if c == '+' && c1 == '+' { return "++" }
+    if c == '-' && c1 == '-' { return "--" }
+    if c == ':' && c1 == '=' { return ":=" }
+    if c == '.' && c1 == '.' { return ".." }
+
+    // 1-char
+    if c == '+' { return "+" }
+    if c == '-' { return "-" }
+    if c == '*' { return "*" }
+    if c == '/' { return "/" }
+    if c == '%' { return "%" }
+    if c == '<' { return "<" }
+    if c == '>' { return ">" }
+    if c == '=' { return "=" }
+    if c == '!' { return "!" }
+    if c == '(' { return "(" }
+    if c == ')' { return ")" }
+    if c == '{' { return "{" }
+    if c == '}' { return "}" }
+    if c == '[' { return "[" }
+    if c == ']' { return "]" }
+    if c == ',' { return "," }
+    if c == ';' { return ";" }
+    if c == ':' { return ":" }
+    if c == '.' { return "." }
+    if c == '@' { return "@" }
+    if c == '|' { return "|" }
+
+    return ""
+}
+
+// ---------- main scan ----------
+
+func Lexer.nextToken() -> Token {
+    self.skipWhitespace()
+    if self.atEnd() {
+        return newToken("EOF", "", self.line, self.col)
+    }
+
+    let startLine = self.line
+    let startCol = self.col
+    let c = self.peek()
+
+    if self.isAlpha(c) {
+        return self.readIdentifier(startLine, startCol)
+    }
+    if self.isDigit(c) {
+        return self.readNumber(startLine, startCol)
+    }
+    if c == '"' {
+        return self.readString(startLine, startCol)
+    }
+    if c == '\'' {
+        return self.readChar(startLine, startCol)
+    }
+
+    let sym = self.matchSymbol()
+    if sym != "" {
+        let n = len(sym)
+        for n > 0 {
+            self.advance()
+            n = n - 1
+        }
+        return newToken(sym, sym, startLine, startCol)
+    }
+
+    // Unknown single character: emit it as-is so downstream sees it.
+    self.advance()
+    let s = fmt.sprintf("%c", c)
+    return newToken(s, s, startLine, startCol)
+}
+
+func Lexer.tokenize() -> []Token {
+    for {
+        let tok = self.nextToken()
+        self.tokens = append(self.tokens, tok)
+        if tok.getKind() == "EOF" {
+            break
+        }
+    }
+    return self.tokens
+}
