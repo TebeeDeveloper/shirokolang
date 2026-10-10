@@ -292,6 +292,12 @@ func (p *Parser) ParseTopDecl() any {
 	if p.At("FUNC") {
 		return p.parseFn()
 	}
+	if p.At("LET") {
+		return p.parseTopLet()
+	}
+	if p.At("CONST") {
+		return p.parseTopConst()
+	}
 	p.errAtCode(p.Peek(), "E_DECL",
 		    fmt.Sprintf("expected declaration, got %s", p.Peek().Kind))
 	return nil
@@ -302,6 +308,25 @@ func (p *Parser) ParseTopDecl() any {
 func (p *Parser) parseType() any {
 	if p.synced() {
 		return nil
+	}
+	if p.At("*") {
+		p.Advance()
+		inner := p.parseType()
+		if p.synced() {
+			return nil
+		}
+		return []any{"PtrType", inner}
+	}
+	if p.At("MAP") {
+		p.Advance()
+		p.Eat("[")
+		key := p.parseType()
+		p.Eat("]")
+		val := p.parseType()
+		if p.synced() {
+			return nil
+		}
+		return []any{"MapType", key, val}
 	}
 	if p.At("[") {
 		p.Advance()
@@ -328,8 +353,6 @@ func (p *Parser) parseType() any {
 	return []any{"NamedType", name}
 }
 
-// parseTupleType parses "(T1, T2, ...)". A single-element form "(T)"
-// normalises to T, so `func f() (int)` is identical to `func f() int`.
 func (p *Parser) parseTupleType() any {
 	p.Eat("(")
 	p.br++
@@ -483,7 +506,6 @@ func (p *Parser) parseFn() any {
 	}
 	p.Eat("FUNC")
 
-	// Receiver is now: `Type.name`, i.e. `func User.f() ...`
 	recv := ""
 	first := p.EatIdent()
 	name := first
@@ -510,7 +532,6 @@ func (p *Parser) parseFn() any {
 	p.br--
 	p.skipNewlines()
 
-	// Return type: `-> T`, `-> (T1, T2)`, or `-> T ! E`.
 	var ret, errTy any
 	if !p.synced() && p.At("->") {
 		p.Advance()
@@ -541,12 +562,56 @@ func (p *Parser) parseFn() any {
 	return []any{"FnDecl", name, params, ret, errTy, body}
 }
 
+func (p *Parser) parseTopLet() any {
+	line, col := p.pos()
+	p.Eat("LET")
+
+	names := []string{p.EatIdent()}
+	for !p.synced() && p.At(",") {
+		p.Advance()
+		names = append(names, p.EatIdent())
+	}
+	if p.synced() {
+		return nil
+	}
+
+	var ty, expr any
+	if p.At("=") {
+		p.Advance()
+		expr = p.parseExpr()
+	} else if len(names) == 1 && !p.isTerm() {
+		ty = p.parseType()
+		if p.At("=") {
+			p.Advance()
+			expr = p.parseExpr()
+		}
+	}
+	if p.synced() {
+		return nil
+	}
+	if expr == nil && ty == nil {
+		p.errAtCode(p.Peek(), "E_TOP_LET",
+			    "top-level let needs a type or initializer")
+		return nil
+	}
+	return withPos([]any{"TopLet", names, ty, expr}, line, col)
+}
+
+func (p *Parser) parseTopConst() any {
+	line, col := p.pos()
+	p.Eat("CONST")
+	name := p.EatIdent()
+	p.Eat("=")
+	expr := p.parseExpr()
+	if p.synced() {
+		return nil
+	}
+	return withPos([]any{"TopConst", name, expr}, line, col)
+}
+
 // ---------- statements ----------
 
 func (p *Parser) parseBlock() any {
-	// A block is a statement context: newlines are significant again,
-	// regardless of how many enclosing expressions we are nested in
-	// (e.g. a `{ ... }` match-arm body while `p.br > 0`).
 	savedBr := p.br
 	p.br = 0
 	defer func() { p.br = savedBr }()
@@ -589,6 +654,22 @@ func (p *Parser) parseStmt() any {
 	}
 	if p.At("RETURN") {
 		return p.parseReturn()
+	}
+	if p.At("BREAK") {
+		line, col := p.pos()
+		p.Advance()
+		if p.synced() {
+			return nil
+		}
+		return withPos([]any{"BreakStmt"}, line, col)
+	}
+	if p.At("CONTINUE") {
+		line, col := p.pos()
+		p.Advance()
+		if p.synced() {
+			return nil
+		}
+		return withPos([]any{"ContinueStmt"}, line, col)
 	}
 	if p.At("IDENT") && (p.PeekN(1).Kind == "++" || p.PeekN(1).Kind == "--") {
 		line, col := p.pos()
@@ -748,6 +829,15 @@ func (p *Parser) parseFor() any {
 		return withPos([]any{"ForRangeStmt", count, body}, line, col)
 	}
 
+	if p.At("{") {
+		p.skipNewlines()
+		body := p.parseBlock()
+		if p.synced() {
+			return nil
+		}
+		return withPos([]any{"ForCondStmt", []any{"BoolExpr", true, line, col}, body}, line, col)
+	}
+
 	if p.At("IDENT") {
 		n1 := p.PeekN(1).Kind
 
@@ -808,23 +898,20 @@ func (p *Parser) parseFor() any {
 			}
 			return withPos([]any{"ForIterStmt", val, idx, src, body}, line, col)
 		}
-
-		p.noStructLit++
-		cond := p.parseExpr()
-		p.noStructLit--
-		if p.synced() {
-			return nil
-		}
-		p.skipNewlines()
-		body := p.parseBlock()
-		if p.synced() {
-			return nil
-		}
-		return withPos([]any{"ForCondStmt", cond, body}, line, col)
 	}
 
-	p.errAtCode(p.Peek(), "E_FOR_HEADER", "malformed for-loop header")
-	return nil
+	p.noStructLit++
+	cond := p.parseExpr()
+	p.noStructLit--
+	if p.synced() {
+		return nil
+	}
+	p.skipNewlines()
+	body := p.parseBlock()
+	if p.synced() {
+		return nil
+	}
+	return withPos([]any{"ForCondStmt", cond, body}, line, col)
 }
 
 func (p *Parser) parseForPost() any {
@@ -883,13 +970,14 @@ func (p *Parser) parseBin(lvl int) any {
 			p.i = save
 			break
 		}
+		line, col := p.pos()
 		op := p.Advance().Kind
 		p.skipNewlines()
 		right := p.parseBin(lvl + 1)
 		if p.synced() {
 			return nil
 		}
-		left = []any{"BinaryExpr", op, left, right}
+		left = withPos([]any{"BinaryExpr", op, left, right}, line, col)
 	}
 	return left
 }
@@ -898,13 +986,14 @@ func (p *Parser) parseUnary() any {
 	if p.synced() {
 		return nil
 	}
-	if p.At("-") || p.At("!") {
+	if p.At("-") || p.At("!") || p.At("&") || p.At("*") {
+		line, col := p.pos()
 		op := p.Advance().Kind
 		inner := p.parseUnary()
 		if p.synced() {
 			return nil
 		}
-		return []any{"UnaryExpr", op, inner}
+		return withPos([]any{"UnaryExpr", op, inner}, line, col)
 	}
 	return p.parsePostfix()
 }
@@ -920,6 +1009,7 @@ func (p *Parser) parsePostfix() any {
 	for {
 		switch {
 			case p.At("("):
+				line, col := p.pos()
 				p.Eat("(")
 				p.br++
 				var args []any
@@ -935,15 +1025,17 @@ func (p *Parser) parsePostfix() any {
 				if p.synced() {
 					return nil
 				}
-				e = []any{"CallExpr", e, args}
+				e = withPos([]any{"CallExpr", e, args}, line, col)
 			case p.At("."):
+				line, col := p.pos()
 				p.Advance()
 				name := p.EatIdent()
 				if p.synced() {
 					return nil
 				}
-				e = []any{"SelectorExpr", e, name}
+				e = withPos([]any{"SelectorExpr", e, name}, line, col)
 			case p.At("["):
+				line, col := p.pos()
 				p.Advance()
 				p.br++
 				var lo any
@@ -965,18 +1057,19 @@ func (p *Parser) parsePostfix() any {
 					if p.synced() {
 						return nil
 					}
-					e = []any{"SliceExpr", e, lo, hi}
+					e = withPos([]any{"SliceExpr", e, lo, hi}, line, col)
 				} else {
 					p.Eat("]")
 					p.br--
 					if p.synced() {
 						return nil
 					}
-					e = []any{"IndexExpr", e, lo}
+					e = withPos([]any{"IndexExpr", e, lo}, line, col)
 				}
 			case p.At("++") || p.At("--"):
+				line, col := p.pos()
 				op := p.Advance().Kind
-				e = []any{"PostfixExpr", op, e}
+				e = withPos([]any{"PostfixExpr", op, e}, line, col)
 			default:
 				return e
 		}
@@ -992,8 +1085,9 @@ func (p *Parser) parseCallArg() any {
 		return nil
 	}
 	if p.At("...") {
+		line, col := p.pos()
 		p.Advance()
-		return []any{"SpreadExpr", e}
+		return withPos([]any{"SpreadExpr", e}, line, col)
 	}
 	return e
 }
@@ -1114,16 +1208,16 @@ func (p *Parser) parsePrimary() any {
 	switch tok.Kind {
 		case "INT":
 			p.Advance()
-			return []any{"IntExpr", tok.Value}
+			return withPos([]any{"IntExpr", tok.Value}, tok.Line, tok.Col)
 		case "FLOAT":
 			p.Advance()
-			return []any{"FloatExpr", tok.Value}
+			return withPos([]any{"FloatExpr", tok.Value}, tok.Line, tok.Col)
 		case "BYTE":
 			p.Advance()
-			return []any{"ByteExpr", tok.Value}
+			return withPos([]any{"ByteExpr", tok.Value}, tok.Line, tok.Col)
 		case "STRING":
 			p.Advance()
-			return []any{"StrExpr", tok.Value}
+			return withPos([]any{"StrExpr", tok.Value}, tok.Line, tok.Col)
 		case "(":
 			p.Eat("(")
 			p.br++
@@ -1138,22 +1232,24 @@ func (p *Parser) parsePrimary() any {
 			return p.parseListOrComp()
 		case "{":
 			return p.parseSetOrComp()
+		case "MAP":
+			return p.parseMapLit()
 		case "IDENT":
 			name, _ := tok.Value.(string)
 			p.Advance()
 			if name == "true" {
-				return []any{"BoolExpr", true}
+				return withPos([]any{"BoolExpr", true}, tok.Line, tok.Col)
 			}
 			if name == "false" {
-				return []any{"BoolExpr", false}
+				return withPos([]any{"BoolExpr", false}, tok.Line, tok.Col)
 			}
 			if name == "nil" {
-				return []any{"NilExpr"}
+				return withPos([]any{"NilExpr"}, tok.Line, tok.Col)
 			}
 			if p.At("{") && p.noStructLit == 0 {
-				return p.parseStructLit(name)
+				return p.parseStructLit(name, tok.Line, tok.Col)
 			}
-			return []any{"IdentExpr", name}
+			return withPos([]any{"IdentExpr", name}, tok.Line, tok.Col)
 		case "FUNC":
 			return p.parseFnLit()
 		case "MATCH":
@@ -1262,6 +1358,49 @@ func (p *Parser) parseSetOrComp() any {
 	return []any{"SetLitExpr", []any{"SetType", elemTy}, elems}
 }
 
+func (p *Parser) parseMapLit() any {
+	p.Eat("MAP")
+	p.Eat("[")
+	keyTy := p.parseType()
+	p.Eat("]")
+	valTy := p.parseType()
+	if p.synced() {
+		return nil
+	}
+	fullTy := []any{"MapType", keyTy, valTy}
+
+	p.Eat("{")
+	p.br++
+	if p.At("}") {
+		p.Eat("}")
+		p.br--
+		return []any{"MapLitExpr", fullTy, []any{}}
+	}
+	var entries []any
+	for !p.At("}") && !p.At("EOF") && !p.synced() {
+		k := p.parseExpr()
+		if p.synced() {
+			return nil
+		}
+		p.Eat(":")
+		v := p.parseExpr()
+		if p.synced() {
+			return nil
+		}
+		entries = append(entries, []any{"MapEntry", k, v})
+		if p.At(",") {
+			p.Advance()
+		}
+		p.skipNewlines()
+	}
+	p.Eat("}")
+	p.br--
+	if p.synced() {
+		return nil
+	}
+	return []any{"MapLitExpr", fullTy, entries}
+}
+
 func (p *Parser) compVar(e any) string {
 	n, ok := e.([]any)
 	if !ok {
@@ -1354,7 +1493,7 @@ func (p *Parser) parseCompAfterFirst(nodeKind string, fullTy any, elem any) any 
 	return []any{nodeKind, fullTy, varName, src, filt, cond, elem}
 }
 
-func (p *Parser) parseStructLit(name string) any {
+func (p *Parser) parseStructLit(name string, line, col int) any {
 	p.Eat("{")
 	p.br++
 	var fields []any
@@ -1379,10 +1518,11 @@ func (p *Parser) parseStructLit(name string) any {
 	if p.synced() {
 		return nil
 	}
-	return []any{"StructLitExpr", name, fields}
+	return withPos([]any{"StructLitExpr", name, fields}, line, col)
 }
 
 func (p *Parser) parseFnLit() any {
+	line, col := p.pos()
 	p.Eat("FUNC")
 	p.Eat("(")
 	p.br++
@@ -1408,7 +1548,6 @@ func (p *Parser) parseFnLit() any {
 			ret = p.parseType()
 		}
 		p.skipNewlines()
-		// Bổ sung phần bắt lỗi `! E` cho function literal nếu có
 		if !p.synced() && p.At("!") {
 			p.Advance()
 			p.skipNewlines()
@@ -1423,6 +1562,5 @@ func (p *Parser) parseFnLit() any {
 	if p.synced() {
 		return nil
 	}
-	// Đảm bảo trả về đủ 5 phần tử khớp với sema.go
-	return []any{"FnLitExpr", params, ret, errTy, body}
+	return withPos([]any{"FnLitExpr", params, ret, errTy, body}, line, col)
 }

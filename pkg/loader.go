@@ -18,11 +18,12 @@ type Result struct {
 // Loader resolves a main file plus every package it transitively
 // imports, then concatenates them into a single source buffer.
 //
-// Every input file must be `package main` (or have no package line at
-// all — the loader treats that as `package main`). Any other package
-// name is rejected. Cycles are permitted: since everything collapses
-// into one program and sema hoists all top-level declarations, the
-// order in which cycle members are emitted doesn't affect correctness.
+// Imports come exclusively from `import { ... }` blocks in .shrko
+// files. There is no side-channel: the modfile holds project metadata
+// only, never a dependency list.
+//
+// Every input file may declare any package name; the loader strips it
+// and always emits `package main`. Cycles are permitted.
 type Loader struct {
 	state map[string]loadState
 	dirs  map[string]string
@@ -44,11 +45,10 @@ func NewLoader() *Loader {
 	}
 }
 
-// Load reads mainFile, merges the imports declared in its source with
-// the ones listed in the sibling shiroko.shrkomod, recursively
-// resolves every transitive import, and returns one concatenated
-// source buffer in dependency order (each package before its
-// importer, the main file last).
+// Load reads mainFile, resolves every import declared in its source
+// (and, recursively, in every transitive package), and returns one
+// concatenated source buffer in dependency order (each package before
+// its importer, the main file last).
 func (l *Loader) Load(mainFile string) (*Result, error) {
 	mainSrc, err := os.ReadFile(mainFile)
 	if err != nil {
@@ -58,17 +58,13 @@ func (l *Loader) Load(mainFile string) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", mainFile, err)
 	}
-	mf, err := LoadModFile(filepath.Dir(mainFile))
-	if err != nil {
-		return nil, err
-	}
-	all := dedup(append(append([]string{}, mf.Imports...), mainImports...))
 
-	for _, imp := range all {
+	mainDir := filepath.Dir(mainFile)
+	for _, imp := range mainImports {
 		if isStd(imp) {
 			continue
 		}
-		if err := l.visit(imp); err != nil {
+		if err := l.visit(mainDir, imp); err != nil {
 			return nil, err
 		}
 	}
@@ -77,14 +73,13 @@ func (l *Loader) Load(mainFile string) (*Result, error) {
 	var files []string
 	var imports []string
 
-	// Dependencies first, main file last.
 	for _, imp := range l.order {
 		srcs, err := readPackage(l.dirs[imp])
 		if err != nil {
 			return nil, err
 		}
 		for _, s := range srcs {
-			_, imps, body, err := stripHeader(s.body)
+			imps, body, err := stripHeader(s.body)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", s.path, err)
 			}
@@ -94,8 +89,7 @@ func (l *Loader) Load(mainFile string) (*Result, error) {
 		}
 	}
 
-	// Main file.
-	_, mainImps, mainBody, err := stripHeader(string(mainSrc))
+	mainImps, mainBody, err := stripHeader(string(mainSrc))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", mainFile, err)
 	}
@@ -126,24 +120,23 @@ func (l *Loader) Load(mainFile string) (*Result, error) {
 	return &Result{Source: buf.String(), Files: files}, nil
 }
 
-// visit resolves one import and, recursively, its own imports.
-func (l *Loader) visit(imp string) error {
+// visit resolves one import, relative to `fromDir`, and recursively its
+// own imports (each resolved relative to the package's own directory).
+func (l *Loader) visit(fromDir, imp string) error {
 	if isStd(imp) {
 		return nil
 	}
 	switch l.state[imp] {
-		case stateDone:
-			return nil
-		case stateVisiting:
-			// Cycle back-edge: the frame above us will append this
-			// package to order once its own recursion returns. No
-			// action needed — cycles are fine in a merged program.
-			return nil
+	case stateDone:
+		return nil
+	case stateVisiting:
+		// Cycle back-edge.
+		return nil
 	}
 
 	l.state[imp] = stateVisiting
 
-	dir, err := Fetch(imp)
+	dir, err := FetchFrom(fromDir, imp)
 	if err != nil {
 		return err
 	}
@@ -154,7 +147,7 @@ func (l *Loader) visit(imp string) error {
 		return fmt.Errorf("%s: %w", imp, err)
 	}
 	for _, sub := range deps {
-		if err := l.visit(sub); err != nil {
+		if err := l.visit(dir, sub); err != nil {
 			return err
 		}
 	}
@@ -164,24 +157,14 @@ func (l *Loader) visit(imp string) error {
 	return nil
 }
 
-// collectImports merges the import block of every .shrko file in dir
-// with the entries in dir/shiroko.shrkomod.
+// collectImports returns the non-stdlib imports declared across every
+// .shrko file in dir, deduplicated.
 func collectImports(dir string) ([]string, error) {
-	mf, err := LoadModFile(dir)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, imp := range mf.Imports {
-		if !isStd(imp) {
-			out = append(out, imp)
-		}
-	}
-
 	srcs, err := readPackage(dir)
 	if err != nil {
 		return nil, err
 	}
+	var out []string
 	for _, s := range srcs {
 		imps, err := ParseImports(s.body)
 		if err != nil {
@@ -227,7 +210,7 @@ func readPackage(dir string) ([]sourceFile, error) {
 		}
 		out = append(out, sourceFile{
 			path: filepath.Join(dir, n),
-			     body: string(body),
+			body: string(body),
 		})
 	}
 	return out, nil
@@ -236,7 +219,9 @@ func readPackage(dir string) ([]sourceFile, error) {
 // ---------- import parsing ----------
 
 // ParseImports extracts every string literal from the first
-// `import { ... }` block in src. Returns nil if there is none.
+// `import { ... }` block in src. Line comments (`//`) and block
+// comments (`/* */`) inside the block are skipped, so a commented-out
+// import is not treated as a live dependency.
 func ParseImports(src string) ([]string, error) {
 	i := indexKeyword(src, "import")
 	if i < 0 {
@@ -253,29 +238,51 @@ func ParseImports(src string) ([]string, error) {
 	j++
 	var out []string
 	for j < len(src) && depth > 0 {
-		switch src[j] {
-			case '{':
-				depth++
+		c := src[j]
+
+		// Line comment.
+		if c == '/' && j+1 < len(src) && src[j+1] == '/' {
+			for j < len(src) && src[j] != '\n' {
 				j++
-			case '}':
-				depth--
+			}
+			continue
+		}
+		// Block comment.
+		if c == '/' && j+1 < len(src) && src[j+1] == '*' {
+			j += 2
+			for j+1 < len(src) && !(src[j] == '*' && src[j+1] == '/') {
 				j++
-			case '"':
-				j++
-				start := j
-				for j < len(src) && src[j] != '"' {
-					if src[j] == '\\' {
-						j++
-					}
+			}
+			if j+1 >= len(src) {
+				return nil, fmt.Errorf("unterminated block comment in import block")
+			}
+			j += 2
+			continue
+		}
+
+		switch c {
+		case '{':
+			depth++
+			j++
+		case '}':
+			depth--
+			j++
+		case '"':
+			j++
+			start := j
+			for j < len(src) && src[j] != '"' {
+				if src[j] == '\\' {
 					j++
 				}
-				if j >= len(src) {
-					return nil, fmt.Errorf("unterminated string in import block")
-				}
-				out = append(out, src[start:j])
 				j++
-			default:
-				j++
+			}
+			if j >= len(src) {
+				return nil, fmt.Errorf("unterminated string in import block")
+			}
+			out = append(out, src[start:j])
+			j++
+		default:
+			j++
 		}
 	}
 	return out, nil
@@ -285,23 +292,17 @@ func ParseImports(src string) ([]string, error) {
 
 // stripHeader removes the leading `package X` line and optional
 // `import { ... }` block from src, returning the imported paths and
-// the remaining body. The package name is validated: it must be
-// empty or `main`.
+// the remaining body. The package name is stripped but not inspected —
+// the loader always emits `package main`, and sub-packages are free
+// to name themselves.
 func stripHeader(src string) (imports []string, body string, err error) {
 	i := skipWS(src, 0)
 
 	if hasKeywordAt(src, i, "package") {
 		i += len("package")
 		i = skipSpaces(src, i)
-		start := i
 		for i < len(src) && isIdentByte(src[i]) {
 			i++
-		}
-		name := src[start:i]
-		if name != "main" {
-			return nil, "", fmt.Errorf(
-				"package %q not allowed: only `package main` is supported",
-			      name)
 		}
 		i = skipLine(src, i)
 		i = skipWS(src, i)
@@ -313,7 +314,30 @@ func stripHeader(src string) (imports []string, body string, err error) {
 		if i < len(src) && src[i] == '{' {
 			i++
 			for i < len(src) && src[i] != '}' {
-				if src[i] == '"' {
+				c := src[i]
+
+				// Line comment.
+				if c == '/' && i+1 < len(src) && src[i+1] == '/' {
+					for i < len(src) && src[i] != '\n' {
+						i++
+					}
+					continue
+				}
+				// Block comment.
+				if c == '/' && i+1 < len(src) && src[i+1] == '*' {
+					i += 2
+					for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
+						i++
+					}
+					if i+1 >= len(src) {
+						return nil, "", fmt.Errorf(
+							"unterminated block comment in import block")
+					}
+					i += 2
+					continue
+				}
+
+				if c == '"' {
 					i++
 					s := i
 					for i < len(src) && src[i] != '"' {
@@ -392,7 +416,7 @@ func indexKeyword(src, kw string) int {
 
 func isIdentByte(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-	(c >= '0' && c <= '9') || c == '_'
+		(c >= '0' && c <= '9') || c == '_'
 }
 
 func isSpace(c byte) bool {
@@ -400,8 +424,7 @@ func isSpace(c byte) bool {
 }
 
 // isStd reports whether an import path refers to a builtin stdlib
-// package. The emitter maps these to Go imports; the loader must not
-// try to fetch them.
+// package.
 func isStd(p string) bool {
 	return strings.HasPrefix(p, "std/")
 }

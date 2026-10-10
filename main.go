@@ -5,34 +5,46 @@ import (
 	"os"
 
 	"shiroko/cli"
+	"shiroko/cnv"
 	"shiroko/core"
 )
 
 func main() {
 	cmd := cli.ParseCli()
 
+	if cmd.Error != "" {
+		fmt.Fprintln(os.Stderr, cnv.CliError(cmd.Error))
+		os.Exit(2)
+	}
+
+	if cmd.Help {
+		fmt.Println(core.ShowHelp(cmd.Cli))
+		return
+	}
+	if cmd.Version {
+		fmt.Println(core.ShowVersion())
+		return
+	}
+
+	var err error
 	switch {
-		case cmd.Error != "":
-			fmt.Fprintln(os.Stderr, cmd.RaiseError())
-			os.Exit(1)
-		case cmd.Version:
-			fmt.Println(core.ShowVersion())
-		case cmd.Help:
-			fmt.Print(core.ShowHelp(cmd.Cli))
-		case cmd.Init:
-			if err := cli.InitCmd(cmd.InitArgs); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-		case cmd.Mod:
-			if err := cli.ModCmd(cmd.ModArgs); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-		case cmd.Build:
-			if err := core.CompileFile(cmd.Input, cmd.Output, cmd.Verbose); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
+	case cmd.Init:
+		err = cli.InitCmd(cmd.InitArgs)
+	case cmd.Mod:
+		err = cli.ModCmd(cmd.ModArgs)
+	case cmd.Build:
+		err = cli.BuildCmd(cmd.Verbose)
+	case cmd.Run:
+		err = cli.RunCmd(cmd.Verbose)
+	case cmd.Check:
+		err = cli.CheckCmd(cmd.Verbose)
+	default:
+		fmt.Fprintln(os.Stderr, core.ShowHelp(cmd.Cli))
+		os.Exit(2)
+	}
+
+	if err != nil {
+		fmt.Fprintln(os.Stderr, cnv.PrintError(err))
+		os.Exit(1)
 	}
 }

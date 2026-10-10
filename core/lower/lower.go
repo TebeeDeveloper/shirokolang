@@ -67,6 +67,12 @@ func (l *Lowerer) lowerDecl(d any) any {
 			selfParam := []any{"Param", "self", []any{"NamedType", recv}, false}
 			params := append([]any{selfParam}, n[3].([]any)...)
 			return []any{"Fn", n[2], params, n[4], l.lowerBlock(n[6]), recv, n[5]}
+		case "TopLet":
+			// ["TopLet", names, ty, expr, line, col]
+			return []any{"GlobalLet", n[1], n[2], l.lowerExpr(n[3])}
+		case "TopConst":
+			// ["TopConst", name, expr, line, col]
+			return []any{"GlobalLet", []string{n[1].(string)}, nil, l.lowerExpr(n[2])}
 	}
 	l.err(fmt.Sprintf("unknown decl %q", n[0].(string)))
 	return nil
@@ -159,8 +165,13 @@ func (l *Lowerer) lowerStmt(s any) []any {
 				[]any{"HBin", bop, []any{"HIdent", name}, []any{"HInt", 1}}}}
 
 		case "ExprStmt":
-			if en, ok := n[1].([]any); ok && en[0].(string) == "MatchExpr" {
-				return []any{l.lowerMatch(en)}
+			if en, ok := n[1].([]any); ok {
+				if en[0].(string) == "MatchExpr" {
+					return []any{l.lowerMatch(en)}
+				}
+				if en[0].(string) == "PostfixExpr" {
+					return []any{l.lowerIncDec(n[1])}
+				}
 			}
 			return []any{[]any{"HExprStmt", l.lowerExpr(n[1])}}
 
@@ -183,9 +194,27 @@ func (l *Lowerer) lowerStmt(s any) []any {
 			return l.lowerForCond(n)
 		case "ForIterStmt":
 			return l.lowerForIter(n)
+		case "BreakStmt":
+			return []any{[]any{"HBreak"}}
+		case "ContinueStmt":
+			return []any{[]any{"HContinue"}}
 	}
 	l.err(fmt.Sprintf("unknown statement %q", n[0].(string)))
 	return nil
+}
+
+// lowerIncDec converts a PostfixExpr `x++` / `x--` into the equivalent
+// HAssign: `x = x ± 1`. Only valid in statement position.
+func (l *Lowerer) lowerIncDec(expr any) any {
+	pe := expr.([]any)
+	op := pe[1].(string)
+	bop := "+"
+	if op == "--" {
+		bop = "-"
+	}
+	lhs := l.lowerExpr(pe[2])
+	return []any{"HAssign", lhs,
+		[]any{"HBin", bop, lhs, []any{"HInt", 1}}}
 }
 
 func (l *Lowerer) lowerIf(s []any) any {
@@ -239,6 +268,9 @@ func (l *Lowerer) lowerForPost(post any) any {
 		case "AssignStmt":
 			return []any{"HAssign", l.lowerExpr(n[1]), l.lowerExpr(n[2])}
 		case "ExprStmt":
+			if en, ok := n[1].([]any); ok && en[0].(string) == "PostfixExpr" {
+				return l.lowerIncDec(n[1])
+			}
 			return []any{"HExprStmt", l.lowerExpr(n[1])}
 	}
 	l.err(fmt.Sprintf("unsupported for-post %q", n[0].(string)))
@@ -610,6 +642,18 @@ func (l *Lowerer) lowerExpr(e any) any {
 				out = append(out, l.lowerExpr(x))
 			}
 			return []any{"HSetLit", n[1], out}
+		case "MapLitExpr":
+			entries := n[2].([]any)
+			var out []any
+			for _, e := range entries {
+				entry := e.([]any)
+				out = append(out, []any{
+					"MapEntry",
+					l.lowerExpr(entry[1]),
+					     l.lowerExpr(entry[2]),
+				})
+			}
+			return []any{"HMapLit", n[1], out}
 		case "ListCompExpr", "SetCompExpr":
 			l.err("comprehensions must appear on the RHS of a " +
 			"let/assign (expression-position comprehensions " +

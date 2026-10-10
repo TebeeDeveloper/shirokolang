@@ -7,6 +7,11 @@ import (
 	"os"
 )
 
+// Cmd is the parsed command line.
+//
+// The compiler verbs are Build, Run and Check. None of them take
+// positional arguments — the project's shiroko.shrkomod supplies the
+// entry file and output path.
 type Cmd struct {
 	Cli string
 
@@ -16,89 +21,86 @@ type Cmd struct {
 	Init     bool
 	InitArgs []string
 
-	Build   bool
-	Verbose bool
-	Input   string
-	Output  string
-
 	Mod     bool
 	ModArgs []string
+
+	Build   bool
+	Run     bool
+	Check   bool
+	Verbose bool
 
 	Error string
 }
 
+// RaiseError returns the parsed error, or a generic hint if none was
+// set. Kept for callers that used to rely on it.
 func (cmd *Cmd) RaiseError() error {
 	if cmd.Error != "" {
 		return fmt.Errorf("%s", cmd.Error)
 	}
-	return fmt.Errorf("Need args to using this compiler. See at %s help", cmd.Cli)
+	return fmt.Errorf("need args. See `%s help`", cmd.Cli)
 }
 
 func ParseCli() *Cmd {
 	cln := os.Args[0]
-	args := os.Args[0:]
+	args := os.Args[1:]
 	cli := &Cmd{Cli: cln}
 
-	if len(args) < 2 {
-		return &Cmd{
-			Cli:   cln,
-			Error: fmt.Sprintf("Need args to use. See at \"%s help\"", cln),
-		}
+	if len(args) == 0 {
+		cli.Error = fmt.Sprintf("need args. See `%s help`", cln)
+		return cli
 	}
 
-	c := args[1]
+	c := args[0]
+	rest := args[1:]
 
 	switch c {
-		case "version":
-			cli.Version = true
+	case "version":
+		cli.Version = true
 
-		case "help":
-			cli.Help = true
+	case "help":
+		cli.Help = true
 
-		case "mod":
-			if len(args) <= 2 {
-				cli.Error = fmt.Sprintf(
-					"Need <package>/<module>. See at \"%s help\"", cln)
-				return cli
-			}
-			cli.Mod = true
-			cli.ModArgs = args[2:]
+	case "init":
+		if len(rest) == 0 {
+			cli.Error = fmt.Sprintf("`init` needs a project name. See `%s help`", cln)
+			return cli
+		}
+		cli.Init = true
+		cli.InitArgs = rest
 
-		case "init":
-			if len(args) <= 2 {
-				cli.Error = fmt.Sprintf(
-					"Need a project name. See at \"%s help\"", cln)
-				return cli
-			}
-			cli.Init = true
-			cli.InitArgs = args[2:]
-
-		case "compile":
-			if len(args) <= 3 {
-				cli.Error = fmt.Sprintf(
-					"Need input-file (with extension \".shrko\") and output-file (any). See at \"%s help\"",
-							cln)
-				return cli
-			}
-			cli.Build = true
-			cli.Input = args[2]
-			cli.Output = args[3]
-
-		case "compile-verbose":
-			if len(args) <= 3 {
-				cli.Error = fmt.Sprintf(
-					"Need input-file (with extension \".shrko\") and output-file (any). See at \"%s help\"",
-							cln)
-				return cli
-			}
-			cli.Build = true
-			cli.Verbose = true
-			cli.Input = args[2]
-			cli.Output = args[3]
-
-		default:
+	case "mod":
+		if len(rest) == 0 {
 			cli.Error = fmt.Sprintf(
-				"Command \"%s\" unexpected. See at \"%s help\"", c, cln)
+				"`mod` needs <name> or <package>/<module>. See `%s help`", cln)
+			return cli
+		}
+		cli.Mod = true
+		cli.ModArgs = rest
+
+	case "build", "run", "check":
+		for _, a := range rest {
+			switch a {
+			case "-v", "--verbose":
+				cli.Verbose = true
+			default:
+				cli.Error = fmt.Sprintf(
+					"`%s` takes no arguments (got %q). See `%s help`",
+					c, a, cln)
+				return cli
+			}
+		}
+		switch c {
+		case "build":
+			cli.Build = true
+		case "run":
+			cli.Run = true
+		case "check":
+			cli.Check = true
+		}
+
+	default:
+		cli.Error = fmt.Sprintf("unknown command %q. See `%s help`", c, cln)
 	}
 
 	return cli

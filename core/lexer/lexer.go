@@ -10,7 +10,7 @@ var Keywords = map[string]bool{
 	"package": true, "import": true, "interface": true, "struct": true,
 	"func": true, "let": true, "const": true, "for": true, "range": true,
 	"iter": true, "if": true, "else": true, "return": true,
-	"match": true,
+	"match": true, "map": true, "break": true, "continue": true,
 }
 
 var Symbols = []string{
@@ -18,6 +18,7 @@ var Symbols = []string{
 	"+", "-", "*", "/", "%", "<", ">", "=", "!",
 	"(", ")", "{", "}", "[", "]",
 	",", ";", ":", ".", "@", "|",
+	"&",
 }
 
 type Token struct {

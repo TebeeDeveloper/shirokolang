@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"shiroko/backend/golang"
+	"shiroko/core/emitter"
 	"shiroko/cnv"
 	"shiroko/core/lexer"
 	"shiroko/core/lower"
@@ -103,9 +103,16 @@ func BuildFile(input string, verbose bool) (*Build, error) {
 	}, nil
 }
 
-// CompileFile is the entry point used by `shirocc compile` and
-// `shirocc compile-verbose`. It builds the IR, transpiles it to Go,
-// and writes the result to `output`.
+// CheckFile runs the front-end (loader → lexer → parser → sema →
+// lower) and returns the IR. Same pipeline as BuildFile; the alias
+// exists so `shirocc check` reads naturally and so the two can diverge
+// later if we decide check should stop before lowering.
+func CheckFile(input string, verbose bool) (*Build, error) {
+	return BuildFile(input, verbose)
+}
+
+// CompileFile builds the IR, transpiles it to Go, and writes the result
+// to `output`.
 func CompileFile(input, output string, verbose bool) error {
 	b, err := BuildFile(input, verbose)
 	if err != nil {
@@ -115,7 +122,7 @@ func CompileFile(input, output string, verbose bool) error {
 	if verbose {
 		fmt.Println("Starting to transpile IR to Golang...")
 	}
-	goSrc, cerr := golang.Generate(b.IR, b.Source)
+	goSrc, cerr := emitter.Generate(b.IR, b.Source)
 	if len(cerr) > 0 {
 		return cnv.EmitterError(cerr)
 	}
@@ -128,23 +135,30 @@ func CompileFile(input, output string, verbose bool) error {
 }
 
 func ShowVersion() string {
-	return "shirocc | Shiroko Compact Compiler . version 26.10"
+	return "shirocc | Shiroko Compact Compiler . version 26.11"
 }
 
 func ShowHelp(cln string) string {
-	return fmt.Sprintf(`Usage:
-	%s init <name>                      create a new project in ./<name>
-	%s mod <name>                       create a library package in ./<name>
-	%s mod <package>/<module>           create a nested library package
-	%s compile <input.shrko> <output>   compile to Go
-	%s compile-verbose <input.shrko> <output>
-	compile with verbose output
+	return fmt.Sprintf(`shirocc — Shiroko Compact Compiler
 
-	Other:
-	%s version                          show version
-	%s help                             show help
+Usage:
+  %s init <name>              create a new project
+  %s mod <name>               add a library package (in ./source)
+  %s mod <package>/<module>   add a nested library package
 
-	Environment:
-	SHIROKO_PATH      colon-separated dirs to search for packages
-`, cln, cln, cln, cln, cln, cln, cln)
+  %s build [-v]               compile the project to Go
+  %s run   [-v]               compile and execute the project
+  %s check [-v]               parse + type-check only
+
+  %s version
+  %s help
+
+The entry file and output path come from the project's
+shiroko.shrkomod. Defaults: source/main.shrko → build/main.go.
+
+Environment:
+  SHIROKO_PATH   colon-separated dirs to search for packages
+  NO_COLOR       disable ANSI colors when set
+`,
+		cln, cln, cln, cln, cln, cln, cln, cln)
 }

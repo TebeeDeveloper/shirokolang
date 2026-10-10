@@ -9,8 +9,13 @@ import (
 )
 
 // InitCmd implements `shirocc init <name>`. It creates a runnable
-// project directory with an entry point (package main + func main)
-// and an empty shiroko.shrkomod.
+// project with the conventional layout:
+//
+//	<name>/
+//	  shiroko.shrkomod
+//	  source/          (.shrko sources)
+//	  build/           (compiled output)
+//	  test/            (tests)
 func InitCmd(args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("usage: shirocc init <name>")
@@ -26,29 +31,61 @@ func InitCmd(args []string) error {
 	}
 	dir := filepath.Join(root, name)
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	for _, sub := range []string{"", "build", "source", "test"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			return err
+		}
 	}
 
-	mainPath := filepath.Join(dir, "main.shrko")
 	modPath := filepath.Join(dir, pkg.ShrkoModName)
+	mainPath := filepath.Join(dir, "source", "main.shrko")
+	testPath := filepath.Join(dir, "test", "main_test.shrko")
 
 	var created []string
 
-	if _, err := os.Stat(mainPath); os.IsNotExist(err) {
-		content := "package main\nimport {\n\t\"std/fmt\"\n}\nfunc main() {\n\tfmt.println(\"hello, world\")\n}\n"
-	if err := os.WriteFile(mainPath, []byte(content), 0o644); err != nil {
-		return err
-	}
-	created = append(created, mainPath)
-	}
-
 	if _, err := os.Stat(modPath); os.IsNotExist(err) {
-		content := fmt.Sprintf("# shiroko.shrkomod for %s\n#\n# List the packages this one imports, one per line:\n#   <name>\n#   <package>/<module>\n#\n# Empty means no dependencies.\n", name)
-		if err := os.WriteFile(modPath, []byte(content), 0o644); err != nil {
+		mf := &pkg.ModFile{
+			Path:    modPath,
+			Name:    name,
+			Version: "0.1.0",
+			Entry:   "source/main.shrko",
+			Output:  "build/main.go",
+		}
+		if err := mf.Save(); err != nil {
 			return err
 		}
 		created = append(created, modPath)
+	}
+
+	if _, err := os.Stat(mainPath); os.IsNotExist(err) {
+		content := `package main
+
+import {
+	"std/fmt"
+}
+
+func main() {
+	fmt.println("hello, world")
+}
+`
+		if err := os.WriteFile(mainPath, []byte(content), 0o644); err != nil {
+			return err
+		}
+		created = append(created, mainPath)
+	}
+
+	if _, err := os.Stat(testPath); os.IsNotExist(err) {
+		content := `package main
+
+// tests for ` + name + `
+func main() {
+	// TODO: write tests
+}
+`
+		if err := os.WriteFile(testPath, []byte(content), 0o644); err != nil {
+			return err
+		}
+		created = append(created, testPath)
 	}
 
 	if len(created) == 0 {
