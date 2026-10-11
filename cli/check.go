@@ -2,30 +2,24 @@ package cli
 
 import (
 	"fmt"
-	"time"
 
 	"shiroko/core"
 )
 
-// CheckCmd implements `shirocc check`. It runs the front-end
-// (loader → lexer → parser → sema → lower) and reports success.
-// No Go source is emitted.
+// CheckCmd is `shirocc check` — runs the frontend and reports whether
+// the current project type-checks.
 func CheckCmd(verbose bool) error {
 	p, err := loadProject()
 	if err != nil {
 		return err
 	}
-
-	start := time.Now()
-	if _, err := core.CheckFile(p.Entry, verbose); err != nil {
+	ok, err := core.CheckFile(p.Entry, verbose)
+	if err != nil {
 		return err
 	}
-
-	if verbose {
-		fmt.Printf("ok  %s  (%s)\n",
-			p.Entry, time.Since(start).Round(time.Millisecond))
-	} else {
-		fmt.Printf("ok  %s\n", p.Entry)
+	if !ok {
+		return fmt.Errorf("check failed: %s", p.Entry)
 	}
+	fmt.Printf("OK %s\n", p.Entry)
 	return nil
 }

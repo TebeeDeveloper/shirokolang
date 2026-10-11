@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE language SYSTEM "language.dtd">
+<language name="Shiroko" version="2.1" kateversion="5.0"
+          section="Sources" extensions="*.shrko"
+          author="Tebee" license="GPL-3.0"
+          priority="9">
+
+  <highlighting>
+
+    <list name="keywords">
+      <item>package</item>
+      <item>for</item>
+      <item>func</item>
+      <item>if</item>
+      <item>import</item>
+      <item>else</item>
+      <item>match</item>
+      <item>let</item>
+      <item>struct</item>
+      <item>interface</item>
+      <item>iter</item>
+      <item>range</item>
+      <item>return</item>
+      <item>break</item>
+      <item>continue</item>
+      <item>const</item>
+      <item>map</item>
+    </list>
+
+    <list name="data_types">
+      <item>int</item>
+      <item>float</item>
+      <item>string</item>
+      <item>any</item>
+      <item>byte</item>
+      <item>bool</item>
+    </list>
+
+    <list name="self_keyword">
+      <item>self</item>
+    </list>
+
+    <list name="boolean">
+      <item>true</item>
+      <item>false</item>
+      <item>nil</item>
+    </list>
+
+    <contexts>
+
+      <context name="Normal" attribute="Normal Text" lineEndContext="#stay">
+
+        <Detect2Chars attribute="Comment" context="CommentState"
+                      char="/" char1="/" />
+
+        <keyword attribute="Self Keyword" context="#stay" String="self_keyword"/>
+        <keyword attribute="Boolean"      context="#stay" String="boolean"/>
+        <keyword attribute="Keyword"      context="#stay" String="keywords"/>
+        <keyword attribute="Data Type"    context="#stay" String="data_types"/>
+
+        <Float attribute="Float" context="#stay"/>
+        <Int   attribute="Int"   context="#stay"/>
+
+        <RegExpr attribute="Function Call" context="#stay"
+                 String="\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()" />
+
+        <RegExpr attribute="Operator" context="#stay"
+                 String="==|!=|&lt;=|&gt;=|&lt;&lt;|&gt;&gt;|\|\||&amp;&amp;|\.\.|\+|-|\*|/|%|&lt;|&gt;|=|!|&amp;|\||\^|~" />
+
+        <DetectChar attribute="String" context="StringState" char="&quot;" />
+
+      </context>
+
+      <context name="CommentState" attribute="Comment" lineEndContext="#pop">
+      </context>
+
+      <context name="StringState" attribute="String"
+               lineEndContext="#pop">
+        <HlCStringChar attribute="String Escape" context="#stay"/>
+        <DetectChar attribute="String" context="#pop" char="&quot;" />
+      </context>
+
+    </contexts>
+
+    <itemDatas>
+      <itemData name="Normal Text"   defStyleNum="dsNormal"/>
+      <itemData name="Keyword"       defStyleNum="dsKeyword"/>
+      <itemData name="Data Type"     defStyleNum="dsDataType"/>
+      <itemData name="Self Keyword"  defStyleNum="dsConstant"/>
+      <itemData name="Boolean"       defStyleNum="dsConstant"/>
+      <itemData name="Function Call" defStyleNum="dsFunction"/>
+      <itemData name="Float"         defStyleNum="dsFloat"/>
+      <itemData name="Int"           defStyleNum="dsDecVal"/>
+      <itemData name="Operator"      defStyleNum="dsOperator"/>
+      <itemData name="Comment"       defStyleNum="dsComment"/>
+      <itemData name="String"        defStyleNum="dsString"/>
+      <itemData name="String Escape" defStyleNum="dsSpecialChar"/>
+    </itemDatas>
+
+  </highlighting>
+
+  <general>
+    <comments>
+      <comment name="singleLine" start="//" />
+    </comments>
+    <keywords casesensitive="1" />
+  </general>
+
+</language>

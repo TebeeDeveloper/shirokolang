@@ -5,13 +5,9 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
-// Cmd is the parsed command line.
-//
-// The compiler verbs are Build, Run and Check. None of them take
-// positional arguments — the project's shiroko.shrkomod supplies the
-// entry file and output path.
 type Cmd struct {
 	Cli string
 
@@ -25,34 +21,61 @@ type Cmd struct {
 	ModArgs []string
 
 	Build   bool
-	Run     bool
 	Check   bool
+	Run     bool
+	Test    bool
+	Repl    bool
 	Verbose bool
+
+	Compile bool
+	Input   string
+	Output  string
 
 	Error string
 }
 
-// RaiseError returns the parsed error, or a generic hint if none was
-// set. Kept for callers that used to rely on it.
 func (cmd *Cmd) RaiseError() error {
 	if cmd.Error != "" {
 		return fmt.Errorf("%s", cmd.Error)
 	}
-	return fmt.Errorf("need args. See `%s help`", cmd.Cli)
+	return fmt.Errorf("Need args to using this compiler. See at %s help", cmd.Cli)
 }
 
 func ParseCli() *Cmd {
 	cln := os.Args[0]
-	args := os.Args[1:]
+	args := os.Args[0:]
 	cli := &Cmd{Cli: cln}
 
-	if len(args) == 0 {
-		cli.Error = fmt.Sprintf("need args. See `%s help`", cln)
-		return cli
+	if len(args) < 2 {
+		return &Cmd{
+			Cli:   cln,
+			Error: fmt.Sprintf("Need args to use. See at \"%s help\"", cln),
+		}
 	}
 
-	c := args[0]
-	rest := args[1:]
+	c := args[1]
+	rest := args[2:]
+
+	// Split flags from positional arguments. Anything starting with
+	// `-` is a flag; everything else is positional.
+	var flags []string
+	var positional []string
+	for _, a := range rest {
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+		} else {
+			positional = append(positional, a)
+		}
+	}
+	for _, f := range flags {
+		switch f {
+		case "-v", "--verbose":
+			cli.Verbose = true
+		default:
+			cli.Error = fmt.Sprintf("unknown flag %q", f)
+			return cli
+		}
+	}
 
 	switch c {
 	case "version":
@@ -62,45 +85,55 @@ func ParseCli() *Cmd {
 		cli.Help = true
 
 	case "init":
-		if len(rest) == 0 {
-			cli.Error = fmt.Sprintf("`init` needs a project name. See `%s help`", cln)
+		if len(positional) < 1 {
+			cli.Error = fmt.Sprintf(
+				"Need a project name. See at \"%s help\"", cln)
 			return cli
 		}
 		cli.Init = true
-		cli.InitArgs = rest
+		cli.InitArgs = positional
 
 	case "mod":
-		if len(rest) == 0 {
+		if len(positional) < 1 {
 			cli.Error = fmt.Sprintf(
-				"`mod` needs <name> or <package>/<module>. See `%s help`", cln)
+				"Need <name> or <package>/<module>. See at \"%s help\"", cln)
 			return cli
 		}
 		cli.Mod = true
-		cli.ModArgs = rest
+		cli.ModArgs = positional
 
-	case "build", "run", "check":
-		for _, a := range rest {
-			switch a {
-			case "-v", "--verbose":
-				cli.Verbose = true
-			default:
-				cli.Error = fmt.Sprintf(
-					"`%s` takes no arguments (got %q). See `%s help`",
-					c, a, cln)
-				return cli
-			}
+	case "build":
+		cli.Build = true
+
+	case "check":
+		cli.Check = true
+
+	case "run":
+		cli.Run = true
+
+	case "test":
+		cli.Test = true
+
+	case "repl":
+		cli.Repl = true
+
+	case "compile", "compile-verbose":
+		if len(positional) < 2 {
+			cli.Error = fmt.Sprintf(
+				"Need input-file (with extension \".shrko\") and output-file (any). See at \"%s help\"",
+				cln)
+			return cli
 		}
-		switch c {
-		case "build":
-			cli.Build = true
-		case "run":
-			cli.Run = true
-		case "check":
-			cli.Check = true
+		cli.Compile = true
+		cli.Input = positional[0]
+		cli.Output = positional[1]
+		if c == "compile-verbose" {
+			cli.Verbose = true
 		}
 
 	default:
-		cli.Error = fmt.Sprintf("unknown command %q. See `%s help`", c, cln)
+		cli.Error = fmt.Sprintf(
+			"Command \"%s\" unexpected. See at \"%s help\"", c, cln)
 	}
 
 	return cli

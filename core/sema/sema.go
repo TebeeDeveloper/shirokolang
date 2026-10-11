@@ -14,6 +14,7 @@ import (
 type SemaError struct {
 	Code string
 	Msg  string
+	Fix  string // optional "did you mean" hint; empty if none
 	Line int
 	Col  int
 	Src  *source.Source
@@ -22,8 +23,19 @@ type SemaError struct {
 func (e *SemaError) String() string {
 	var b strings.Builder
 
+	line := e.Line
+	loc := fmt.Sprintf("line %d:%d", line, e.Col)
+	if e.Src != nil {
+		line = e.Src.DisplayLine(e.Line)
+		if f := e.Src.DisplayFile(e.Line); f != "" {
+			loc = fmt.Sprintf("%s:%d:%d", f, line, e.Col)
+		} else {
+			loc = fmt.Sprintf("line %d:%d", line, e.Col)
+		}
+	}
+
 	fmt.Fprintf(&b, "%s %s %s",
-		    color.Yellow(fmt.Sprintf("line %d:%d", e.Line, e.Col)),
+		    color.Yellow(loc),
 		    color.Dim("=>"),
 		    color.Magenta("sema error"),
 	)
@@ -55,6 +67,12 @@ func (e *SemaError) String() string {
 		    color.Dim("=>"),
 		    color.Yellow("reason:")+" "+e.Msg,
 	)
+	if e.Fix != "" {
+		fmt.Fprintf(&b, "\n%s %s",
+			    color.Dim("=>"),
+			    color.Yellow("fix:")+" "+e.Fix,
+		)
+	}
 	return b.String()
 }
 
@@ -291,6 +309,23 @@ func (s *Scope) Lookup(name string) *Symbol {
 	return nil
 }
 
+// Names returns every symbol name visible from this scope, closest
+// first. Used for "did you mean" suggestions.
+func (s *Scope) Names() []string {
+	seen := map[string]bool{}
+	var out []string
+	for sc := s; sc != nil; sc = sc.Parent {
+		for name := range sc.Symbols {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 type Param struct {
 	Name string
 	Type Type
@@ -379,9 +414,20 @@ var BuiltinPackages = map[string]map[string]Type{
 	},
 }
 
+// BuiltinFuncs are always in scope. Unlike std/* packages, these do
+// not require an import.
 var BuiltinFuncs = map[string]Type{
 	"len":    Type{"fn", []Type{TAny}, TInt, false},
 	"append": Type{"fn", []Type{Type{"list", TAny}, TAny}, Type{"list", TAny}, false},
+
+	"deepEqual": Type{"fn", []Type{TAny, TAny}, TBool, false},
+	"methodsOf": Type{"fn", []Type{TAny}, Type{"list", TString}, false},
+	"fieldsOf":  Type{"fn", []Type{TAny}, Type{"list", TString}, false},
+
+	// make is handled specially in inferCall; this entry only exists
+	// so the identifier resolves. Its real type comes from the
+	// type-name argument, not from this signature.
+	"make": Type{"fn", []Type{TString, TAny}, TAny, true},
 }
 
 // ---------- Sema ----------
@@ -397,30 +443,56 @@ type Sema struct {
 	CurrentErr Type
 	loopDepth  int
 
+	importedPkgs map[string]bool
+
 	unknownReported bool
+
+	// Types maps a source node's (line, col) to the type sema inferred
+	// for it. The lowerer reads this table to attach type info to HIR
+	// nodes.
+	Types map[[2]int]Type
 
 	Src *source.Source
 }
 
 func New(src *source.Source) *Sema {
 	s := &Sema{
-		Structs:    map[string]*StructInfo{},
-		Interfaces: map[string]*InterfaceInfo{},
-		Funcs:      map[string]*FnSig{},
-		Methods:    map[string]*FnSig{},
-		Globals:    NewScope(nil),
-		Src:        src,
-	}
-	s.installBuiltins()
-	return s
-}
-
-func (s *Sema) installBuiltins() {
-	for pkg := range BuiltinPackages {
-		s.Globals.Symbols[pkg] = &Symbol{Name: pkg, Kind: "package", Type: Type{"package", pkg}}
+		Structs:      map[string]*StructInfo{},
+		Interfaces:   map[string]*InterfaceInfo{},
+		Funcs:        map[string]*FnSig{},
+		Methods:      map[string]*FnSig{},
+		Globals:      NewScope(nil),
+		importedPkgs: map[string]bool{},
+		Types:        map[[2]int]Type{},
+		Src:          src,
 	}
 	for name, sig := range BuiltinFuncs {
 		s.Globals.Symbols[name] = &Symbol{Name: name, Kind: "func", Type: sig}
+	}
+	return s
+}
+
+// installPackages registers a `package` symbol for every std/* import.
+func (s *Sema) installPackages(imports []string) {
+	for _, imp := range imports {
+		if !strings.HasPrefix(imp, "std/") {
+			continue
+		}
+		name := importName(imp)
+		if _, ok := BuiltinPackages[name]; !ok {
+			s.errAtCode(nil, "S_UNKNOWN_IMPORT",
+				fmt.Sprintf("unknown stdlib package %q", imp))
+			continue
+		}
+		if s.importedPkgs[name] {
+			continue
+		}
+		s.importedPkgs[name] = true
+		s.Globals.Symbols[name] = &Symbol{
+			Name: name,
+			Kind: "package",
+			Type: Type{"package", name},
+		}
 	}
 }
 
@@ -434,6 +506,14 @@ func (s *Sema) errAt(n any, msg string) {
 
 func (s *Sema) errAtCode(n any, code, msg string) {
 	e := &SemaError{Code: code, Msg: msg, Src: s.Src}
+	if line, col, ok := nodePos(n); ok {
+		e.Line, e.Col = line, col
+	}
+	s.Errors = append(s.Errors, e)
+}
+
+func (s *Sema) errAtCodeFix(n any, code, msg, fix string) {
+	e := &SemaError{Code: code, Msg: msg, Fix: fix, Src: s.Src}
 	if line, col, ok := nodePos(n); ok {
 		e.Line, e.Col = line, col
 	}
@@ -474,6 +554,8 @@ func (s *Sema) Analyze(prog []any) []*SemaError {
 		imports, _ = prog[2].([]string)
 	}
 
+	s.installPackages(imports)
+
 	s.collectNames(decls)
 	s.resolveTypes(decls)
 	s.collectSignatures(decls)
@@ -481,6 +563,21 @@ func (s *Sema) Analyze(prog []any) []*SemaError {
 	s.checkBodies(decls)
 	s.checkImports(imports)
 	return s.Errors
+}
+
+// TypeOf returns the type sema recorded for the given AST node, or nil
+// if the node has no recorded type. Used by the lowerer to attach type
+// info to HIR nodes.
+func (s *Sema) TypeOf(node any) Type {
+	if s == nil {
+		return nil
+	}
+	if line, col, ok := nodePos(node); ok {
+		if ty, ok := s.Types[[2]int{line, col}]; ok {
+			return ty
+		}
+	}
+	return nil
 }
 
 // ---------- pass 1a: names ----------
@@ -1297,12 +1394,14 @@ func (s *Sema) checkReturn(stmt any, scope *Scope) {
 	}
 
 	tupleRet := isKind(s.CurrentRet, "tuple")
+	isVoid := isKind(s.CurrentRet, "void")
 	var wants []Type
-	if tupleRet {
-		wants = s.CurrentRet[1].([]Type)
-	} else if typesEqual(s.CurrentRet, TVoid) {
+	switch {
+	case isVoid:
 		wants = nil
-	} else {
+	case tupleRet:
+		wants = s.CurrentRet[1].([]Type)
+	default:
 		wants = []Type{s.CurrentRet}
 	}
 
@@ -1462,6 +1561,20 @@ func (s *Sema) checkLValue(tgt any, scope *Scope) Type {
 					if ft, ok := info.Fields[fname]; ok {
 						return ft
 					}
+					cands := make([]string, 0, len(info.Fields)+len(info.Methods))
+					for f := range info.Fields {
+						cands = append(cands, f)
+					}
+					for m := range info.Methods {
+						cands = append(cands, m)
+					}
+					if sug := suggest(fname, cands); sug != "" {
+						s.errAtCodeFix(tgt, "S_NO_MEMBER",
+							fmt.Sprintf("%s has no field %q", sname, fname),
+							fmt.Sprintf("Did you mean %q?", sug))
+						s.unknownReported = true
+						return TUnknown
+					}
 				}
 				s.errAt(tgt, fmt.Sprintf("%s has no field %q", sname, fname))
 				return TUnknown
@@ -1500,7 +1613,21 @@ func (s *Sema) checkLValue(tgt any, scope *Scope) Type {
 
 // ---------- expressions ----------
 
+// infer records the type sema computes for each source expression,
+// keyed by the node's (line, col). Downstream consumers (the lowerer)
+// read this table to attach type info to IR nodes.
 func (s *Sema) infer(e any, scope *Scope) Type {
+	ty := s.inferRaw(e, scope)
+	if ty != nil && !isUnknown(ty) {
+		if line, col, ok := nodePos(e); ok {
+			s.Types[[2]int{line, col}] = ty
+		}
+	}
+	return ty
+}
+
+// inferRaw is the actual dispatcher.
+func (s *Sema) inferRaw(e any, scope *Scope) Type {
 	if e == nil {
 		return TUnknown
 	}
@@ -1573,7 +1700,21 @@ func (s *Sema) inferIdent(n []any, at any, scope *Scope) Type {
 	name := n[1].(string)
 	sym := scope.Lookup(name)
 	if sym == nil {
-		s.errAt(at, fmt.Sprintf("undefined: %s", name))
+		if _, ok := BuiltinPackages[name]; ok {
+			s.errAtCodeFix(at, "S_PKG_NOT_IMPORTED",
+				fmt.Sprintf("package %q is used but not imported", name),
+				fmt.Sprintf("Add `import { \"std/%s\" }`", name))
+			s.unknownReported = true
+			return TUnknown
+		}
+		if sug := suggest(name, scope.Names()); sug != "" {
+			s.errAtCodeFix(at, "S_UNDEFINED",
+				fmt.Sprintf("undefined: %s", name),
+				fmt.Sprintf("Did you mean %q?", sug))
+		} else {
+			s.errAt(at, fmt.Sprintf("undefined: %s", name))
+		}
+		s.unknownReported = true
 		return TUnknown
 	}
 	sym.Used = true
@@ -1602,8 +1743,6 @@ func (s *Sema) inferUnary(n []any, at any, scope *Scope) Type {
 			}
 			return TBool
 		case "&":
-			// `&x`, `&obj.field`, `&arr[i]` — real address-of on an l-value.
-			// `&StructLit{...}` — Go-style heap allocation, also valid.
 			if !isAssignable(n[2]) && !isStructLit(n[2]) {
 				s.errAt(at, "cannot take address of a non-l-value")
 				return TUnknown
@@ -1632,13 +1771,13 @@ func isAssignable(e any) bool {
 	return false
 }
 
+func isStructLit(e any) bool {
+	n, ok := e.([]any)
+	return ok && len(n) > 0 && n[0].(string) == "StructLitExpr"
+}
+
 // assignable reports whether a value of type `from` can go into a
-// slot of type `to`. Same as typesEqual, plus:
-//   - concrete → interface, if the concrete type implements the iface
-//   - interface → interface, if the source has a superset of methods
-//
-// The reverse (interface → concrete) is deliberately not allowed:
-// that needs a type assertion, which the language doesn't have yet.
+// slot of type `to`.
 func (s *Sema) assignable(from, to Type) bool {
 	if typesEqual(from, to) {
 		return true
@@ -1649,8 +1788,6 @@ func (s *Sema) assignable(from, to Type) bool {
 	return false
 }
 
-// implements reports whether concrete type `from` satisfies
-// interface `to`. Handles struct, *struct, and interface-to-interface.
 func (s *Sema) implements(from, to Type) bool {
 	if !isKind(to, "interface") {
 		return false
@@ -1660,7 +1797,6 @@ func (s *Sema) implements(from, to Type) bool {
 		return false
 	}
 
-	// Interface → interface: every method of `to` must appear in `from`.
 	if isKind(from, "interface") {
 		src := s.Interfaces[from[1].(string)]
 		if src == nil {
@@ -1675,8 +1811,6 @@ func (s *Sema) implements(from, to Type) bool {
 		return true
 	}
 
-	// Struct / *struct → interface: every method of `to` must appear in
-	// the struct's method table.
 	var structName string
 	switch {
 		case isKind(from, "struct"):
@@ -1699,19 +1833,13 @@ func (s *Sema) implements(from, to Type) bool {
 	return true
 }
 
-// assignErr formats an assignment error with a hint when the problem
-// is an interface trying to become a concrete value.
 func (s *Sema) assignErr(from, to Type) string {
 	if isKind(from, "interface") && !isKind(to, "interface") {
-		return fmt.Sprintf("cannot assign %s (interface) to %s; "+
-			"a type assertion is needed", typeStr(from), typeStr(to))
+		return fmt.Sprintf(
+			"cannot assign %s (interface) to %s; a type assertion is needed",
+			typeStr(from), typeStr(to))
 	}
 	return fmt.Sprintf("cannot assign %s to %s", typeStr(from), typeStr(to))
-}
-
-func isStructLit(e any) bool {
-    n, ok := e.([]any)
-    return ok && len(n) > 0 && n[0].(string) == "StructLitExpr"
 }
 
 func (s *Sema) inferBinary(n []any, at any, scope *Scope) Type {
@@ -1779,6 +1907,12 @@ func (s *Sema) inferBinary(n []any, at any, scope *Scope) Type {
 func (s *Sema) inferCall(n []any, at any, scope *Scope) Type {
 	callee := n[1]
 	args := n[2].([]any)
+
+	if id, ok := callee.([]any); ok && len(id) >= 2 {
+		if id[0].(string) == "IdentExpr" && id[1].(string) == "make" {
+			return s.inferMake(at, args, scope)
+		}
+	}
 
 	if cn, ok := callee.([]any); ok && len(cn) > 1 && cn[0].(string) == "IdentExpr" {
 		if conv, ok := conversions[cn[1].(string)]; ok {
@@ -1873,6 +2007,137 @@ func (s *Sema) inferCall(n []any, at any, scope *Scope) Type {
 	return ret
 }
 
+// inferMake handles make(T[, len]). The first argument must be a
+// string literal naming a type. Returns a pointer for struct types,
+// or the allocated container type otherwise.
+func (s *Sema) inferMake(at any, args []any, scope *Scope) Type {
+	if len(args) == 0 {
+		s.errAtCode(at, "S_MAKE_ARGS", "make: missing type name")
+		return TUnknown
+	}
+	nameNode, ok := args[0].([]any)
+	if !ok || len(nameNode) < 2 || nameNode[0].(string) != "StrExpr" {
+		s.errAtCode(at, "S_MAKE_ARGS",
+			"make: first argument must be a type name string, e.g. make(\"Data\")")
+		return TUnknown
+	}
+	typeName := nameNode[1].(string)
+
+	// Zero-arg form: make("Data"), make("[]int"), make("map[K]V").
+	// Length form: make("[]int", n).
+	if len(args) >= 2 {
+		lt := s.infer(args[1], scope)
+		if !typesEqual(lt, TInt) {
+			s.errAt(args[1], fmt.Sprintf(
+				"make: length must be int, got %s", typeStr(lt)))
+		}
+	}
+
+	ty := s.parseTypeName(typeName, at)
+	if ty == nil {
+		return TUnknown
+	}
+
+	switch {
+		case isKind(ty, "struct"):
+			// make("Data") — pointer to a fresh zero-valued struct.
+			return Type{"ptr", ty}
+
+		case isKind(ty, "list"),
+			isKind(ty, "set"),
+			isKind(ty, "map"):
+			return ty
+
+		case isKind(ty, "ptr"):
+			// make("*Data") is unusual but harmless — same as nil.
+			return ty
+	}
+
+	s.errAtCode(at, "S_MAKE_TYPE",
+		fmt.Sprintf("make: cannot allocate %s", typeStr(ty)))
+	return TUnknown
+}
+
+// parseTypeName converts a runtime type-name string into a sema Type.
+// Handles the string forms that typeNodeName produces:
+//
+//	"int"            TInt
+//	"[]T"            list of T
+//	"{}T"            set of T
+//	"map[K]V"        map from K to V
+//	"*T"             pointer to T
+//	"Data"           struct Data, if declared
+//
+// Returns nil and reports an error if the name is unknown or malformed.
+func (s *Sema) parseTypeName(name string, at any) Type {
+	name = strings.TrimSpace(name)
+
+	switch name {
+		case "int":
+			return TInt
+		case "float":
+			return TFloat
+		case "string":
+			return TString
+		case "byte":
+			return TByte
+		case "bool":
+			return TBool
+		case "any":
+			return TAny
+		case "error":
+			return TError
+	}
+
+	if strings.HasPrefix(name, "*") {
+		inner := s.parseTypeName(name[1:], at)
+		if inner == nil {
+			return nil
+		}
+		return Type{"ptr", inner}
+	}
+	if strings.HasPrefix(name, "[]") {
+		inner := s.parseTypeName(name[2:], at)
+		if inner == nil {
+			return nil
+		}
+		return Type{"list", inner}
+	}
+	if strings.HasPrefix(name, "{}") {
+		inner := s.parseTypeName(name[2:], at)
+		if inner == nil {
+			return nil
+		}
+		return Type{"set", inner}
+	}
+	if strings.HasPrefix(name, "map[") {
+		close := strings.Index(name, "]")
+		if close < 0 {
+			s.errAtCode(at, "S_MAKE_TYPE",
+				fmt.Sprintf("make: malformed map type %q", name))
+			return nil
+		}
+		keyTy := s.parseTypeName(name[4:close], at)
+		valTy := s.parseTypeName(name[close+1:], at)
+		if keyTy == nil || valTy == nil {
+			return nil
+		}
+		return Type{"map", keyTy, valTy}
+	}
+
+	if _, ok := s.Structs[name]; ok {
+		return Type{"struct", name}
+	}
+	if _, ok := s.Interfaces[name]; ok {
+		return Type{"interface", name}
+	}
+
+	s.errAtCodeFix(at, "S_MAKE_TYPE",
+		fmt.Sprintf("make: unknown type %q", name),
+		"Use a declared struct name, or one of: int, float, string, bool, byte, []T, {}T, map[K]V")
+	return nil
+}
+
 func (s *Sema) inferSelector(n []any, at any, scope *Scope) Type {
 	name := n[2].(string)
 	bt := s.infer(n[1], scope)
@@ -1881,9 +2146,6 @@ func (s *Sema) inferSelector(n []any, at any, scope *Scope) Type {
 			"cannot resolve type of receiver for `.%s`", name))
 		return TUnknown
 	}
-	// Auto-deref through a pointer: Go does this, and it keeps the
-	// surface syntax free of explicit `*p` when the pointee is a
-	// struct or interface.
 	if isKind(bt, "ptr") {
 		bt = bt[1].(Type)
 	}
@@ -1894,7 +2156,19 @@ func (s *Sema) inferSelector(n []any, at any, scope *Scope) Type {
 			if t, ok := members[name]; ok {
 				return t
 			}
-			s.errAt(at, fmt.Sprintf("package %q has no member %q", pkg, name))
+			cands := make([]string, 0, len(members))
+			for k := range members {
+				cands = append(cands, k)
+			}
+			if sug := suggest(name, cands); sug != "" {
+				s.errAtCodeFix(at, "S_NO_MEMBER",
+					fmt.Sprintf("package %q has no member %q", pkg, name),
+					fmt.Sprintf("Did you mean %q?", sug))
+			} else {
+				s.errAtCode(at, "S_NO_MEMBER",
+					fmt.Sprintf("package %q has no member %q", pkg, name))
+			}
+			s.unknownReported = true
 			return TUnknown
 
 		case isKind(bt, "struct"):
@@ -1910,7 +2184,22 @@ func (s *Sema) inferSelector(n []any, at any, scope *Scope) Type {
 			if sig, ok := info.Methods[name]; ok {
 				return sig.Type()
 			}
-			s.errAt(at, fmt.Sprintf("%s has no field or method %q", sname, name))
+			cands := make([]string, 0, len(info.Fields)+len(info.Methods))
+			for f := range info.Fields {
+				cands = append(cands, f)
+			}
+			for m := range info.Methods {
+				cands = append(cands, m)
+			}
+			if sug := suggest(name, cands); sug != "" {
+				s.errAtCodeFix(at, "S_NO_MEMBER",
+					fmt.Sprintf("%s has no field or method %q", sname, name),
+					fmt.Sprintf("Did you mean %q?", sug))
+			} else {
+				s.errAtCode(at, "S_NO_MEMBER",
+					fmt.Sprintf("%s has no field or method %q", sname, name))
+			}
+			s.unknownReported = true
 			return TUnknown
 
 		case isKind(bt, "interface"):
@@ -1921,7 +2210,21 @@ func (s *Sema) inferSelector(n []any, at any, scope *Scope) Type {
 					return sig.Type()
 				}
 			}
-			s.errAt(at, fmt.Sprintf("interface %s has no method %q", sname, name))
+			cands := []string{}
+			if info != nil {
+				for m := range info.Methods {
+					cands = append(cands, m)
+				}
+			}
+			if sug := suggest(name, cands); sug != "" {
+				s.errAtCodeFix(at, "S_NO_MEMBER",
+					fmt.Sprintf("interface %s has no method %q", sname, name),
+					fmt.Sprintf("Did you mean %q?", sug))
+			} else {
+				s.errAtCode(at, "S_NO_MEMBER",
+					fmt.Sprintf("interface %s has no method %q", sname, name))
+			}
+			s.unknownReported = true
 			return TUnknown
 	}
 	s.errAt(at, fmt.Sprintf("cannot select %q on %s", name, typeStr(bt)))
@@ -2020,7 +2323,17 @@ func (s *Sema) inferStructLit(n []any, at any, scope *Scope) Type {
 		seen[fname] = true
 		ft, ok := info.Fields[fname]
 		if !ok {
-			s.errAt(f, fmt.Sprintf("%s has no field %q", name, fname))
+			cands := make([]string, 0, len(info.Fields))
+			for k := range info.Fields {
+				cands = append(cands, k)
+			}
+			if sug := suggest(fname, cands); sug != "" {
+				s.errAtCodeFix(f, "S_NO_FIELD",
+					fmt.Sprintf("%s has no field %q", name, fname),
+					fmt.Sprintf("Did you mean %q?", sug))
+			} else {
+				s.errAt(f, fmt.Sprintf("%s has no field %q", name, fname))
+			}
 			s.infer(fval, scope)
 			continue
 		}
@@ -2395,4 +2708,75 @@ func (s *Sema) checkOverlap(seen []patternInterval, pat any, lo, hi any, isRange
 		return seen
 	}
 	return append(seen, patternInterval{lo: lo, hi: hi, isRange: isRange})
+}
+
+// ---------- suggestions ----------
+
+// levenshtein computes the edit distance between two strings.
+func levenshtein(a, b string) int {
+	if a == "" {
+		return len(b)
+	}
+	if b == "" {
+		return len(a)
+	}
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := 0; j <= len(b); j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min3(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
+}
+
+func min3(a, b, c int) int {
+	if a < b {
+		if a < c {
+			return a
+		}
+		return c
+	}
+	if b < c {
+		return b
+	}
+	return c
+}
+
+// suggest returns the closest candidate to name, or "" if nothing is
+// within the edit-distance threshold. Comparison is case-insensitive.
+//
+// Threshold grows with the input length so short names need exact or
+// near-exact matches, while long names tolerate a couple of typos.
+func suggest(name string, candidates []string) string {
+	threshold := len(name) / 3
+	if threshold < 1 {
+		threshold = 1
+	}
+	if threshold > 3 {
+		threshold = 3
+	}
+	lower := strings.ToLower(name)
+	best := ""
+	bestDist := threshold + 1
+	for _, c := range candidates {
+		if c == name {
+			continue
+		}
+		d := levenshtein(lower, strings.ToLower(c))
+		if d < bestDist {
+			bestDist = d
+			best = c
+		}
+	}
+	return best
 }

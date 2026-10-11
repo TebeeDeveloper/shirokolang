@@ -51,6 +51,11 @@ func Lex(src string) ([]Token, error) {
 			continue
 		}
 		if c == ' ' || c == '\t' || c == '\r' {
+			if c == '\t' {
+				i++
+				col += 4 - ((col - 1) & 4)
+				continue
+			}
 			i++
 			col++
 			continue

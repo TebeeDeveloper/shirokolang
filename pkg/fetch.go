@@ -78,7 +78,7 @@ func FetchFrom(from, importPath string) (string, error) {
 	}
 
 	// 3–5: from the project root, if we can find one.
-	if root := FindProjectRoot(from); root != "" && root != from {
+	if root, err := FindProjectRoot(from); err == nil && root != "" && root != from {
 		if d, ok := try(filepath.Join(root, "vendor")); ok {
 			return d, nil
 		}

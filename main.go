@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"shiroko/cli"
-	"shiroko/cnv"
 	"shiroko/core"
 )
 
@@ -13,38 +12,49 @@ func main() {
 	cmd := cli.ParseCli()
 
 	if cmd.Error != "" {
-		fmt.Fprintln(os.Stderr, cnv.CliError(cmd.Error))
-		os.Exit(2)
-	}
-
-	if cmd.Help {
-		fmt.Println(core.ShowHelp(cmd.Cli))
-		return
-	}
-	if cmd.Version {
-		fmt.Println(core.ShowVersion())
-		return
+		fmt.Fprintln(os.Stderr, cmd.Error)
+		os.Exit(1)
 	}
 
 	var err error
+
 	switch {
+	case cmd.Version:
+		fmt.Println(core.ShowVersion())
+
+	case cmd.Help:
+		fmt.Println(core.ShowHelp(cmd.Cli))
+
 	case cmd.Init:
 		err = cli.InitCmd(cmd.InitArgs)
+
 	case cmd.Mod:
 		err = cli.ModCmd(cmd.ModArgs)
+
 	case cmd.Build:
 		err = cli.BuildCmd(cmd.Verbose)
-	case cmd.Run:
-		err = cli.RunCmd(cmd.Verbose)
+
 	case cmd.Check:
 		err = cli.CheckCmd(cmd.Verbose)
+
+	case cmd.Run:
+		err = cli.RunCmd(cmd.Verbose)
+
+	case cmd.Test:
+		err = cli.TestCmd(cmd.Verbose)
+
+	case cmd.Repl:
+		err = cli.ReplCmd()
+
+	case cmd.Compile:
+		err = core.CompileFile(cmd.Input, cmd.Output, cmd.Verbose)
+
 	default:
-		fmt.Fprintln(os.Stderr, core.ShowHelp(cmd.Cli))
-		os.Exit(2)
+		err = cmd.RaiseError()
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, cnv.PrintError(err))
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }

@@ -22,8 +22,19 @@ type ParseError struct {
 func (e *ParseError) String() string {
 	var b strings.Builder
 
+	line := e.Line
+	loc := fmt.Sprintf("line %d:%d", line, e.Col)
+	if e.Src != nil {
+		line = e.Src.DisplayLine(e.Line)
+		if f := e.Src.DisplayFile(e.Line); f != "" {
+			loc = fmt.Sprintf("%s:%d:%d", f, line, e.Col)
+		} else {
+			loc = fmt.Sprintf("line %d:%d", line, e.Col)
+		}
+	}
+
 	fmt.Fprintf(&b, "%s %s %s",
-		    color.Yellow(fmt.Sprintf("line %d:%d", e.Line, e.Col)),
+		    color.Yellow(loc),
 		    color.Dim("=>"),
 		    color.Magenta("parse error"),
 	)

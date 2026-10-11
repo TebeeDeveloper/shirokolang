@@ -2,6 +2,16 @@ package lower
 
 import "fmt"
 
+// Type is an alias for the sema type representation. Declared here so
+// lower can name it without importing sema.
+type Type = []any
+
+// TypeLookup is the narrow view of sema that the lowerer needs. Any
+// type that can answer "what type does this AST node have?" works.
+type TypeLookup interface {
+	TypeOf(node any) Type
+}
+
 type LowerError struct {
 	Msg string
 }
@@ -11,9 +21,12 @@ func (e *LowerError) Error() string { return e.Msg }
 type Lowerer struct {
 	Errors     []*LowerError
 	tmpCounter int
+	types      TypeLookup
 }
 
-func New() *Lowerer { return &Lowerer{} }
+func New(types TypeLookup) *Lowerer {
+	return &Lowerer{types: types}
+}
 
 func (l *Lowerer) err(msg string) {
 	l.Errors = append(l.Errors, &LowerError{msg})
@@ -22,6 +35,19 @@ func (l *Lowerer) err(msg string) {
 func (l *Lowerer) newTmp() string {
 	l.tmpCounter++
 	return fmt.Sprintf("__t%d", l.tmpCounter)
+}
+
+// typed appends the sema-recorded type of astNode to the HIR node.
+// Returns the HIR node unchanged if no type was recorded.
+func (l *Lowerer) typed(astNode any, hir []any) []any {
+	if l.types == nil {
+		return hir
+	}
+	ty := l.types.TypeOf(astNode)
+	if ty == nil {
+		return hir
+	}
+	return append(hir, ty)
 }
 
 // ---------- program ----------
@@ -49,8 +75,6 @@ func (l *Lowerer) lowerDecl(d any) any {
 		case "InterfaceDecl":
 			return []any{"Interface", n[1], append([]any{}, n[2].([]any)...)}
 		case "FnDecl":
-			// ["FnDecl", name, params, ret, errTy, body]
-			// IR:     ["Fn", name, params, ret, body, recv, errTy]
 			return []any{
 				"Fn",
 				n[1],
@@ -61,17 +85,13 @@ func (l *Lowerer) lowerDecl(d any) any {
 				n[4],
 			}
 		case "MethodDecl":
-			// ["MethodDecl", recv, name, params, ret, errTy, body]
-			// IR:           ["Fn", name, params, ret, body, recv, errTy]
 			recv := n[1]
 			selfParam := []any{"Param", "self", []any{"NamedType", recv}, false}
 			params := append([]any{selfParam}, n[3].([]any)...)
 			return []any{"Fn", n[2], params, n[4], l.lowerBlock(n[6]), recv, n[5]}
 		case "TopLet":
-			// ["TopLet", names, ty, expr, line, col]
 			return []any{"GlobalLet", n[1], n[2], l.lowerExpr(n[3])}
 		case "TopConst":
-			// ["TopConst", name, expr, line, col]
 			return []any{"GlobalLet", []string{n[1].(string)}, nil, l.lowerExpr(n[2])}
 	}
 	l.err(fmt.Sprintf("unknown decl %q", n[0].(string)))
@@ -97,9 +117,6 @@ func (l *Lowerer) lowerStmt(s any) []any {
 			expr := n[3]
 			els := n[4]
 
-			// `let x = do() else { ... }` — the else block runs when
-			// `expr` (a fallible call) fails. Kept as its own node so
-			// the emitter can produce `x, err := ...; if err != nil {...}`.
 			if els != nil {
 				if len(names) != 1 {
 					l.err("let-else requires exactly one name")
@@ -203,8 +220,6 @@ func (l *Lowerer) lowerStmt(s any) []any {
 	return nil
 }
 
-// lowerIncDec converts a PostfixExpr `x++` / `x--` into the equivalent
-// HAssign: `x = x ± 1`. Only valid in statement position.
 func (l *Lowerer) lowerIncDec(expr any) any {
 	pe := expr.([]any)
 	op := pe[1].(string)
@@ -420,9 +435,11 @@ func (l *Lowerer) lowerComp(comp []any, target string, declare bool) []any {
 				[]any{"HBlock", []any{inner}}, nil}
 		}
 		body := []any{
-			[]any{"HIf", l.lowerExpr(stop),
+			[]any{"HIf",
+				[]any{"HUn", "!", l.lowerExpr(stop)},   // ← phủ định
 				[]any{"HBlock", []any{[]any{"HBreak"}}}, nil},
 				inner,
+
 				[]any{"HAssign", []any{"HIdent", varName},
 				[]any{"HBin", "+", []any{"HIdent", varName}, []any{"HInt", 1}}},
 		}
@@ -572,7 +589,26 @@ func (l *Lowerer) lowerMatch(m []any) any {
 
 // ---------- expressions ----------
 
+// lowerExpr wraps lowerExprRaw: after the raw HIR node is built, the
+// sema-recorded type of the source expression is appended as the last
+// element. Downstream code indexes from the front, so appending is
+// safe.
 func (l *Lowerer) lowerExpr(e any) any {
+	if e == nil {
+		return nil
+	}
+	h := l.lowerExprRaw(e)
+	if h == nil {
+		return nil
+	}
+	n, ok := h.([]any)
+	if !ok {
+		return h
+	}
+	return l.typed(e, n)
+}
+
+func (l *Lowerer) lowerExprRaw(e any) any {
 	if e == nil {
 		return nil
 	}
@@ -650,7 +686,7 @@ func (l *Lowerer) lowerExpr(e any) any {
 				out = append(out, []any{
 					"MapEntry",
 					l.lowerExpr(entry[1]),
-					     l.lowerExpr(entry[2]),
+					l.lowerExpr(entry[2]),
 				})
 			}
 			return []any{"HMapLit", n[1], out}
@@ -666,11 +702,10 @@ func (l *Lowerer) lowerExpr(e any) any {
 			l.err("spread `...` only allowed in call arguments")
 			return []any{"HInt", 0}
 		case "FnLitExpr":
-			// ["FnLitExpr", params, ret, errTy, body]
 			return []any{"HFnLit",
 				append([]any{}, n[1].([]any)...),
 				n[2],
-				n[3], // errTy
+				n[3],
 				l.lowerBlock(n[4])}
 		case "MatchExpr":
 			l.err("match is only valid as a statement")
@@ -683,6 +718,6 @@ func (l *Lowerer) lowerExpr(e any) any {
 	return []any{"HInt", 0}
 }
 
-func Lower(prog []any) ([]any, []*LowerError) {
-	return New().LowerProgram(prog)
+func Lower(prog []any, types TypeLookup) ([]any, []*LowerError) {
+	return New(types).LowerProgram(prog)
 }
