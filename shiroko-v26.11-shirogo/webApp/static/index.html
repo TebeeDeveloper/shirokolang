@@ -1,0 +1,810 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shiroko Playground</title>
+
+  <style>
+    :root {
+      --bg: #282a36;
+      --bg-alt: #21222c;
+      --panel: #191a21;
+      --fg: #f8f8f2;
+      --line: #44475a;
+      --accent: #bd93f9;
+      --muted: #6272a4;
+      --red: #ff5555;
+      --green: #50fa7b;
+      --yellow: #f1fa8c;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0; width: 100%; height: 100%;
+      background: var(--bg); color: var(--fg);
+      font: 13px/1.5 Consolas, monospace;
+    }
+
+    body {
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+
+    header {
+      display: flex; align-items: center; flex-wrap: wrap;
+      gap: 9px; padding: 9px 12px;
+      background: var(--bg-alt); border-bottom: 1px solid var(--line);
+    }
+
+    .brand {
+      color: var(--accent); font-size: 15px; font-weight: bold;
+      margin-right: 8px;
+    }
+
+    .spacer { flex: 1; }
+
+    button, input, select, textarea { font: inherit; }
+
+    button {
+      padding: 7px 12px; color: var(--fg); background: #44475a;
+      border: 1px solid transparent; border-radius: 5px;
+      cursor: pointer; transition: background .15s;
+    }
+    button:hover { background: #6272a4; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.primary { background: #7952a8; }
+    button.primary:hover { background: #9068bf; }
+    button.secondary { background: #343746; border-color: var(--line); }
+
+    #status { color: var(--muted); font-size: 11px; }
+
+    .toolbar {
+      display: flex; flex-wrap: wrap; align-items: center;
+      gap: 12px; padding: 8px 12px;
+      background: #252733; border-bottom: 1px solid var(--line);
+    }
+
+    .toolbar label {
+      display: flex; align-items: center; gap: 6px;
+      color: var(--muted); font-size: 11px;
+    }
+
+    .toolbar input[type="text"],
+    .toolbar select {
+      padding: 6px 8px; color: var(--fg); background: var(--bg-alt);
+      border: 1px solid var(--line); border-radius: 4px; outline: none;
+    }
+    .toolbar input[type="text"]:focus,
+    .toolbar select:focus { border-color: var(--accent); }
+
+    .toolbar input[type="file"] {
+      max-width: 210px; color: var(--muted);
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr);
+      flex: 1; min-height: 0;
+    }
+
+    .pane {
+      display: flex; flex-direction: column;
+      min-width: 0; min-height: 0; overflow: hidden;
+    }
+
+    .editor-pane { border-right: 1px solid var(--line); }
+
+    .pane-heading {
+      display: flex; align-items: center; justify-content: space-between;
+      min-height: 35px; padding: 7px 12px;
+      color: var(--muted); background: var(--bg-alt);
+      border-bottom: 1px solid var(--line);
+      font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    }
+
+    #editor { flex: 1; min-height: 0; width: 100%; }
+
+    .io {
+      gap: 8px; padding: 10px; overflow-y: auto;
+    }
+
+    .io label {
+      margin-top: 4px; color: var(--muted);
+      font-size: 11px; text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    .io textarea, .io pre {
+      width: 100%; margin: 0; padding: 9px;
+      color: var(--fg); background: var(--bg-alt);
+      border: 1px solid var(--line); border-radius: 5px;
+      font: inherit; line-height: 1.5;
+      white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto;
+    }
+
+    .io textarea {
+      min-height: 75px; resize: vertical; outline: none;
+    }
+    .io textarea:focus { border-color: var(--accent); }
+
+    .io pre { min-height: 55px; max-height: 25vh; }
+
+    #stdout { color: var(--green); }
+    #stderr { color: var(--red); }
+    #meta { min-height: 16px; color: var(--muted); font-size: 11px; }
+
+    .footer {
+      padding: 6px 12px; color: var(--muted);
+      background: var(--bg-alt); border-top: 1px solid var(--line);
+      font-size: 11px;
+    }
+
+    @media (max-width: 760px) {
+      body { height: auto; min-height: 100%; overflow: auto; }
+      header { gap: 7px; }
+      #status { flex-basis: 100%; }
+      main {
+        grid-template-columns: 1fr;
+        grid-template-rows: 55vh auto;
+      }
+      .editor-pane {
+        border-right: 0; border-bottom: 1px solid var(--line);
+      }
+      #editor { min-height: 300px; }
+      .io pre { max-height: 180px; }
+    }
+  </style>
+
+  <link rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/editor/editor.main.css">
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs/loader.js"></script>
+  <script src="wasm_exec.js"></script>
+</head>
+
+<body>
+  <header>
+    <div class="brand">◈ Shiroko Playground</div>
+    <button id="run" class="primary" disabled>▶ Run</button>
+    <button id="download" class="secondary" disabled>⬇ Download</button>
+    <button id="share" class="secondary">🔗 Share</button>
+    <span class="spacer"></span>
+    <span id="status">Đang khởi động...</span>
+  </header>
+
+  <div class="toolbar">
+    <label>
+      File
+      <input id="sourceFile" type="file"
+        accept=".sk,.shiroko,.txt,.go,.cpp,.c">
+    </label>
+
+    <label>
+      Tên file
+      <input id="fileName" type="text" value="main.sk">
+    </label>
+
+    <label>
+      Target
+      <select id="targetSelect">
+        <option value="go" selected>Go</option>
+      </select>
+    </label>
+
+    <span class="spacer"></span>
+    <span style="color:var(--muted);font-size:11px">
+      Ctrl + Enter để chạy
+    </span>
+  </div>
+
+  <main>
+    <section class="pane editor-pane">
+      <div class="pane-heading">
+        <span>Source · Shiroko</span>
+        <span id="lineInfo">Monaco Editor</span>
+      </div>
+      <div id="editor"></div>
+    </section>
+
+    <section class="pane">
+      <div class="pane-heading">
+        <span>Console</span>
+        <button id="clear" class="secondary">Clear</button>
+      </div>
+
+      <div class="io">
+        <label for="stdin">STDIN · Input</label>
+        <textarea id="stdin" spellcheck="false"
+          placeholder="Nhập dữ liệu đầu vào tại đây..."></textarea>
+
+        <label for="stdout">STDOUT · Output</label>
+        <pre id="stdout"></pre>
+
+        <label for="stderr">STDERR · Errors</label>
+        <pre id="stderr"></pre>
+
+        <div id="meta"></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="footer">
+    Shiroko Playground · Dracula Theme · Monaco Editor
+  </div>
+
+  <script>
+    "use strict";
+
+    const $ = id => document.getElementById(id);
+
+    const runBtn      = $("run");
+    const downloadBtn = $("download");
+    const shareBtn    = $("share");
+    const statusEl    = $("status");
+    const stdoutEl    = $("stdout");
+    const stderrEl    = $("stderr");
+    const metaEl      = $("meta");
+    const stdinEl     = $("stdin");
+    const fileInput   = $("sourceFile");
+    const fileNameInput = $("fileName");
+
+    let editor = null;
+    let wasmReady = false;
+    let lastGeneratedCode = null;
+    let lastGeneratedName = "main.go";
+
+    const starterCode = `package main
+
+import {
+    "std/fmt"
+}
+
+func main() {
+    fmt.println("hello, shiroko")
+    let x = 0
+
+    for i = 0, i < 5, i++ {
+        x = x + i
+    }
+
+    fmt.println("sum 0..4 =", x)
+}
+`;
+
+    // --------------------------------------------------
+    // STATUS / CONSOLE
+    // --------------------------------------------------
+    function setStatus(message, type = "normal") {
+      statusEl.textContent = message;
+      statusEl.style.color =
+        type === "error"   ? "var(--red)"   :
+        type === "success" ? "var(--green)" :
+                             "var(--muted)";
+    }
+
+    function clearConsole() {
+      stdoutEl.textContent = "";
+      stderrEl.textContent = "";
+      metaEl.textContent = "";
+    }
+
+    function toText(value) {
+      if (value == null) return "";
+      if (typeof value === "string") return value;
+      try { return JSON.stringify(value, null, 2); }
+      catch { return String(value); }
+    }
+
+    // --------------------------------------------------
+    // SHARE
+    // --------------------------------------------------
+    function encodeSource(source) {
+      const bytes = new TextEncoder().encode(source);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+    function decodeSource(encoded) {
+      let base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+      while (base64.length % 4) base64 += "=";
+      const binary = atob(base64);
+      const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+      return new TextDecoder().decode(bytes);
+    }
+    function getSharedSource() {
+      if (!location.hash.startsWith("#s=")) return null;
+      try { return decodeSource(location.hash.slice(3)); }
+      catch { return null; }
+    }
+
+    shareBtn.addEventListener("click", async () => {
+      if (!editor) return;
+      const fragment = "#s=" + encodeSource(editor.getValue());
+      const url = location.origin + location.pathname + fragment;
+      history.replaceState(null, "", fragment);
+      try {
+        await navigator.clipboard.writeText(url);
+        const old = shareBtn.textContent;
+        shareBtn.textContent = "✓ Copied";
+        setTimeout(() => shareBtn.textContent = old, 1200);
+      } catch {
+        prompt("Sao chép liên kết này:", url);
+      }
+    });
+
+    // --------------------------------------------------
+    // DOWNLOAD
+    // --------------------------------------------------
+    function downloadText(content, filename) {
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename || "main.txt";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    downloadBtn.addEventListener("click", () => {
+      if (typeof lastGeneratedCode !== "string") {
+        stderrEl.textContent = "Chưa có mã nguồn để tải xuống.";
+        return;
+      }
+      downloadText(lastGeneratedCode, lastGeneratedName);
+    });
+
+    // --------------------------------------------------
+    // WASM BOOT
+    // --------------------------------------------------
+    async function bootWasm() {
+      try {
+        if (typeof Go !== "function") {
+          throw new Error("Không tìm thấy Go runtime. Kiểm tra wasm_exec.js.");
+        }
+
+        setStatus("Đang tải WebAssembly...");
+
+        const response = await fetch("shiroko.wasm");   // ★ đúng tên file
+        if (!response.ok) {
+          throw new Error(`Không tải được shiroko.wasm: HTTP ${response.status}`);
+        }
+
+        const bytes = await response.arrayBuffer();
+        const go = new Go();
+        go.argv = ["shiroko"];
+        go.env = {};
+
+        const result = await WebAssembly.instantiate(bytes, go.importObject);
+
+        // go.run() không bao giờ resolve (Go main giữ select{}).
+        Promise.resolve(go.run(result.instance)).catch(err => {
+          console.error("Go WASM error:", err);
+          wasmReady = false;
+          runBtn.disabled = true;
+          setStatus("WASM runtime error", "error");
+          stderrEl.textContent = String(err);
+        });
+
+        // Poll cho đến khi API sẵn sàng
+        const waitReady = () => {
+          if (typeof window.ShiroInterpret === "function") {
+            wasmReady = true;
+            runBtn.disabled = false;
+            downloadBtn.disabled = false;
+            setStatus("WASM đã tải · sẵn sàng ✓", "success");
+
+            const hasHover    = typeof window.ShiroTypeAt    === "function";
+            const hasComplete = typeof window.ShiroComplete  === "function";
+            const hasMembers  = typeof window.ShiroMembers   === "function";
+            console.log(
+              `[Shiroko] Hover: ${hasHover} · Complete: ${hasComplete} · Members: ${hasMembers}`
+            );
+          } else {
+            setTimeout(waitReady, 50);
+          }
+        };
+        waitReady();
+
+      } catch (error) {
+        wasmReady = false;
+        runBtn.disabled = true;
+        downloadBtn.disabled = true;
+        setStatus("Không tải được WASM", "error");
+        stderrEl.textContent = error.message || String(error);
+        console.error(error);
+      }
+    }
+
+    // --------------------------------------------------
+    // MONACO
+    // --------------------------------------------------
+    require.config({
+      paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.0/min/vs" }
+    });
+
+    require(["vs/editor/editor.main"], () => {
+
+      // ----- Dracula theme -----
+      monaco.editor.defineTheme("dracula", {
+        base: "vs-dark",
+        inherit: true,
+        rules: [
+          { token: "",                  foreground: "f8f8f2", background: "282a36" },
+          { token: "comment",           foreground: "6272a4", fontStyle: "italic" },
+          { token: "keyword",           foreground: "ff79c6" },
+          { token: "string",            foreground: "f1fa8c" },
+          { token: "number",            foreground: "bd93f9" },
+          { token: "type",              foreground: "8be9fd", fontStyle: "italic" },
+          { token: "identifier",        foreground: "f8f8f2" },
+          { token: "function",          foreground: "50fa7b" },
+          { token: "package",           foreground: "8be9fd" },
+        ],
+        colors: {
+          "editor.background": "#282a36",
+          "editor.foreground": "#f8f8f2",
+          "editorLineNumber.foreground": "#6272a4",
+          "editorLineNumber.activeForeground": "#f8f8f2",
+          "editorCursor.foreground": "#f8f8f2",
+          "editor.selectionBackground": "#44475a",
+          "editor.lineHighlightBackground": "#44475a75",
+          "editorIndentGuide.background": "#44475a",
+          "editorGutter.background": "#282a36",
+          "editorWidget.background": "#21222c",
+          "editorWidget.border": "#44475a",
+          "editorSuggestWidget.background": "#21222c",
+          "editorSuggestWidget.border": "#44475a",
+          "editorSuggestWidget.selectedBackground": "#44475a",
+        },
+      });
+
+      // ----- Language -----
+      monaco.languages.register({ id: "shiroko" });
+
+      monaco.languages.setMonarchTokensProvider("shiroko", {
+        keywords: [
+          "func", "let", "if", "else", "for", "return",
+          "import", "package", "range", "iter", "break",
+          "continue", "true", "false", "nil", "const",
+          "match", "struct", "interface", "map", "self",
+        ],
+        typeKeywords: ["int","float","string","bool","byte","error"],
+        builtins: [
+          "println", "print", "len", "cap", "append",
+          "make", "new", "copy", "delete", "panic",
+          "recover", "close",
+        ],
+        tokenizer: {
+          root: [
+            [/\/\/.*$/, "comment"],
+            [/\/\*/, "comment", "@comment"],
+            [/[a-zA-Z_]\w*(?=\s*\()/, { cases: {
+              "@keywords": "keyword",
+              "@typeKeywords": "type",
+              "@builtins": "function",
+              "@default": "function",
+            }}],
+            [/[a-zA-Z_]\w*(?=\s*\.)/, { cases: {
+              "@keywords": "keyword",
+              "@typeKeywords": "type",
+              "@default": "package",
+            }}],
+            [/[a-zA-Z_]\w*/, { cases: {
+              "@keywords": "keyword",
+              "@typeKeywords": "type",
+              "@builtins": "function",
+              "@default": "identifier",
+            }}],
+            [/\d+\.\d+([eE][\-+]?\d+)?/, "number"],
+            [/\d+[eE][\-+]?\d+/, "number"],
+            [/0[xX][0-9a-fA-F]+/, "number"],
+            [/\d+/, "number"],
+            [/"([^"\\]|\\.)*"/, "string"],
+            [/'([^'\\]|\\.)*'/, "string"],
+            [/`[^`]*`/, "string"],
+            [/[{}()\[\]]/, "@brackets"],
+            [/[=!<>]=?|[+\-*\/%&|^]=?|:=|<<|>>|\+\+|--/, "operator"],
+            [/[;,.]/, "delimiter"],
+          ],
+          comment: [
+            [/[^/*]+/, "comment"],
+            [/\*\//, "comment", "@pop"],
+            [/[/*]/, "comment"],
+          ],
+        },
+      });
+
+      // =================================================
+      // ★ 1. COMPLETION — static + ShiroComplete + ShiroMembers
+      // =================================================
+      monaco.languages.registerCompletionItemProvider("shiroko", {
+        triggerCharacters: [".", " "],
+        provideCompletionItems: (model, position) => {
+          const word = model.getWordUntilPosition(position);
+          const range = {
+            startLineNumber: position.lineNumber,
+            endLineNumber: position.lineNumber,
+            startColumn: word.startColumn,
+            endColumn: word.endColumn,
+          };
+
+          const K = monaco.languages.CompletionItemKind;
+          const R = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+          const s = (label, kind, insertText) => ({
+            label, kind, range,
+            insertText: insertText || label,
+            insertTextRules: insertText ? R : undefined,
+          });
+
+          // ---- 1a. Detect `recv.` → suggest members ----
+          const lineText = model.getLineContent(position.lineNumber);
+          const beforeCursor = lineText.substring(0, position.column - 1);
+          const dotMatch = beforeCursor.match(/([a-zA-Z_]\w*)\.(\w*)$/);
+
+          if (dotMatch && typeof window.ShiroMembers === "function") {
+            const recvName = dotMatch[1];
+            const prefix = dotMatch[2] || "";
+
+            let r;
+            try { r = window.ShiroMembers(model.getValue(), recvName); }
+            catch { r = null; }
+
+            if (r && r.status === 200 && Array.isArray(r.items) && r.items.length > 0) {
+              const suggestions = r.items
+                .filter(item => item && item.label && item.label.startsWith(prefix))
+                .map(item => {
+                  const isCallable = item.kind === "method" || item.kind === "func";
+                  return {
+                    label: item.label,
+                    kind:
+                      item.kind === "method" ? K.Method   :
+                      item.kind === "field"  ? K.Field    :
+                      item.kind === "func"   ? K.Function :
+                                               K.Text,
+                    detail: item.detail,
+                    insertText: isCallable ? item.label + "(${1})" : item.label,
+                    insertTextRules: isCallable ? R : undefined,
+                    range: {
+                      startLineNumber: position.lineNumber,
+                      endLineNumber: position.lineNumber,
+                      startColumn: position.column - prefix.length,
+                      endColumn: position.column,
+                    },
+                  };
+                });
+              return { suggestions };
+            }
+            if (r && r.status === 200) {
+              return { suggestions: [] };
+            }
+          }
+
+          // ---- 1b. Static keywords + builtins ----
+          const suggestions = [
+            s("func",      K.Keyword,  "func ${1:name}(${2}) {\n\t$0\n}"),
+            s("let",       K.Keyword,  "let ${1:name} = ${2:value}"),
+            s("const",     K.Keyword,  "const ${1:NAME} = ${2:value}"),
+            s("if",        K.Keyword,  "if ${1:cond} {\n\t$0\n}"),
+            s("else",      K.Keyword,  "else {\n\t$0\n}"),
+            s("for",       K.Keyword,  "for ${1:i} = 0, ${1:i} < ${2:n}, ${1:i}++ {\n\t$0\n}"),
+            s("for-range", K.Keyword,  "for range ${1:n} {\n\t$0\n}"),
+            s("for-iter",  K.Keyword,  "for ${1:x} = iter ${2:xs} {\n\t$0\n}"),
+            s("return",    K.Keyword,  "return ${0}"),
+            s("break",     K.Keyword),
+            s("continue",  K.Keyword),
+            s("import",    K.Keyword,  "import {\n\t\"std/${1:fmt}\"\n}"),
+            s("package",   K.Keyword,  "package main"),
+            s("struct",    K.Keyword,  "struct ${1:Name} {\n\t${2:field} ${3:int}\n}"),
+            s("interface", K.Keyword,  "interface ${1:Name} {\n\t${2:method}(${3}) -> ${4:int}\n}"),
+            s("match",     K.Keyword,  "match ${1:expr} {\n\t${2:_} => ${3},\n}"),
+            s("true",      K.Keyword),
+            s("false",     K.Keyword),
+            s("nil",       K.Keyword),
+
+            s("println",   K.Function, "println(${1})"),
+            s("print",     K.Function, "print(${1})"),
+            s("printf",    K.Function, "printf(${1:format}, ${2})"),
+            s("sprintf",   K.Function, "sprintf(${1:format}, ${2})"),
+            s("sprintln",  K.Function, "sprintln(${1})"),
+            s("errorf",    K.Function, "errorf(${1:format}, ${2})"),
+            s("len",       K.Function, "len(${1})"),
+            s("append",    K.Function, "append(${1:list}, ${2:item})"),
+            s("make",      K.Function, "make(\"${1:Type}\")"),
+            s("deepEqual", K.Function, "deepEqual(${1}, ${2})"),
+            s("methodsOf", K.Function, "methodsOf(${1})"),
+            s("fieldsOf",  K.Function, "fieldsOf(${1})"),
+
+            s("int",       K.Function, "int(${1})"),
+            s("float",     K.Function, "float(${1})"),
+            s("byte",      K.Function, "byte(${1})"),
+            s("string",    K.Function, "string(${1})"),
+
+            s("int",       K.TypeParameter),
+            s("float",     K.TypeParameter),
+            s("string",    K.TypeParameter),
+            s("bool",      K.TypeParameter),
+            s("byte",      K.TypeParameter),
+            s("any",       K.TypeParameter),
+            s("error",     K.TypeParameter),
+          ];
+
+          // ---- 1c. User symbols via ShiroComplete ----
+          if (typeof window.ShiroComplete === "function") {
+            try {
+              const r = window.ShiroComplete(
+                model.getValue(),
+                position.lineNumber,
+                position.column
+              );
+              if (r && r.status === 200 && Array.isArray(r.items)) {
+                const seen = new Set(suggestions.map(x => x.label));
+                for (const item of r.items) {
+                  if (!item || !item.label || seen.has(item.label)) continue;
+                  seen.add(item.label);
+                  suggestions.push({
+                    label: item.label,
+                    kind: mapSymbolKind(item.kind),
+                    detail: item.detail,
+                    range,
+                  });
+                }
+              }
+            } catch { /* silent */ }
+          }
+
+          return { suggestions };
+        },
+      });
+
+      function mapSymbolKind(kind) {
+        const K = monaco.languages.CompletionItemKind;
+        switch (kind) {
+          case "func":      return K.Function;
+          case "var":       return K.Variable;
+          case "global":    return K.Variable;
+          case "const":     return K.Constant;
+          case "package":   return K.Module;
+          case "struct":    return K.Struct;
+          case "interface": return K.Interface;
+          default:          return K.Text;
+        }
+      }
+
+      // =================================================
+      // ★ 2. HOVER — hiện type của identifier
+      // =================================================
+      monaco.languages.registerHoverProvider("shiroko", {
+        provideHover: (model, position) => {
+          if (typeof window.ShiroTypeAt !== "function") return null;
+
+          const word = model.getWordAtPosition(position);
+          if (!word) return null;
+
+          const src = model.getValue();
+          const line = position.lineNumber;
+          const col = word.startColumn;
+
+          let r;
+          try { r = window.ShiroTypeAt(src, line, col); }
+          catch { return null; }
+
+          if (!r || r.status !== 200) return null;
+
+          return {
+            range: new monaco.Range(line, word.startColumn, line, word.endColumn),
+            contents: [
+              { value: `\`\`\`shiroko\n${word.word}  ${r.type}\n\`\`\`` },
+            ],
+          };
+        },
+      });
+
+      // ----- Create editor -----
+      editor = monaco.editor.create($("editor"), {
+        value: getSharedSource() || starterCode,
+        language: "shiroko",
+        theme: "dracula",
+        fontSize: 15,
+        minimap: { enabled: false },
+        automaticLayout: true,
+        tabSize: 4,
+        scrollBeyondLastLine: false,
+        wordWrap: "on",
+        padding: { top: 12, bottom: 12 },
+      });
+
+      function updateLineCount() {
+        const count = editor.getModel().getLineCount();
+        $("lineInfo").textContent = `${count} lines`;
+      }
+      editor.onDidChangeModelContent(updateLineCount);
+      updateLineCount();
+
+      setStatus("Editor sẵn sàng · đang tải WASM...");
+      bootWasm();
+    });
+
+    // --------------------------------------------------
+    // RUN
+    // --------------------------------------------------
+    runBtn.addEventListener("click", () => {
+      if (!editor || !wasmReady) return;
+
+      clearConsole();
+
+      const source = editor.getValue();
+      const input = stdinEl.value;
+      const startedAt = performance.now();
+
+      runBtn.disabled = true;
+      setStatus("Đang chạy chương trình...");
+
+      try {
+        if (typeof window.ShiroInterpret !== "function") {
+          throw new Error("Chưa có ShiroInterpret(source, stdin).");
+        }
+
+        // ★ Sync — không await
+        const result = window.ShiroInterpret(source, input);
+        const elapsed = performance.now() - startedAt;
+
+        if (!result || typeof result !== "object") {
+          throw new Error("API không trả về object hợp lệ.");
+        }
+
+        if (result.status === 200) {
+          stdoutEl.textContent = toText(result.output || "");
+          stderrEl.textContent = "";
+          setStatus("Chạy thành công ✓", "success");
+        } else {
+          stdoutEl.textContent = "";
+          const phase = result.phase ? `[${result.phase}] ` : "";
+          stderrEl.textContent = phase + (result.error || "unknown error");
+          setStatus("Chương trình báo lỗi", "error");
+        }
+
+        metaEl.textContent = `${elapsed.toFixed(1)} ms · local`;
+      } catch (error) {
+        stderrEl.textContent = error.message || String(error);
+        setStatus("Không thể chạy chương trình", "error");
+      } finally {
+        runBtn.disabled = !wasmReady;
+      }
+    });
+
+    // --------------------------------------------------
+    // OPEN LOCAL FILE
+    // --------------------------------------------------
+    fileInput.addEventListener("change", async () => {
+      const file = fileInput.files?.[0];
+      if (!file || !editor) return;
+      try {
+        const source = await file.text();
+        editor.setValue(source);
+        fileNameInput.value = file.name;
+        clearConsole();
+        setStatus(`Đã mở ${file.name}`, "success");
+      } catch (error) {
+        stderrEl.textContent = "Không đọc được file: " + (error.message || error);
+        setStatus("Lỗi đọc file", "error");
+      }
+    });
+
+    // --------------------------------------------------
+    // CLEAR
+    // --------------------------------------------------
+    $("clear").addEventListener("click", clearConsole);
+
+    // --------------------------------------------------
+    // CTRL + ENTER
+    // --------------------------------------------------
+    window.addEventListener("keydown", event => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        if (!runBtn.disabled) runBtn.click();
+      }
+    });
+  </script>
+</body>
+</html>
