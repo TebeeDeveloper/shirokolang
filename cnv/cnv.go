@@ -29,7 +29,7 @@ func ParserError(errs []*parser.ParseError) error {
 	for _, e := range errs {
 		fmt.Fprintf(&sb, "%s\n", e.Error())
 	}
-	return fmt.Errorf("Parser Error(s):\n%s", sb.String())
+	return fmt.Errorf("%s", sb.String())
 }
 
 func SemaError(errs []*sema.SemaError) error {
@@ -37,7 +37,7 @@ func SemaError(errs []*sema.SemaError) error {
 	for _, se := range errs {
 		fmt.Fprintf(&sb, "%s\n", se.Error())
 	}
-	return fmt.Errorf("Semantic Error(s):\n%s", sb.String())
+	return fmt.Errorf("%s", sb.String())
 }
 
 func LowerError(errs []*lower.LowerError) error {
@@ -45,7 +45,7 @@ func LowerError(errs []*lower.LowerError) error {
 	for _, e := range errs {
 		fmt.Fprintf(&sb, "%s\n", e.Error())
 	}
-	return fmt.Errorf("Lower Error(s):\n%s", sb.String())
+	return fmt.Errorf("%s", sb.String())
 }
 
 func EmitterError(errs []*emitter.CodegenError) error {
@@ -53,7 +53,7 @@ func EmitterError(errs []*emitter.CodegenError) error {
 	for _, e := range errs {
 		fmt.Fprintf(&sb, "%s\n", e.Error())
 	}
-	return fmt.Errorf("Emitter Error(s):\n%s", sb.String())
+	return fmt.Errorf("%s", sb.String())
 }
 
 func CompileError(err error) error {

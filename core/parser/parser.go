@@ -34,9 +34,9 @@ func (e *ParseError) String() string {
 	}
 
 	fmt.Fprintf(&b, "%s %s %s",
-		    color.Yellow(loc),
-		    color.Dim("=>"),
-		    color.Magenta("parse error"),
+		color.Yellow(loc),
+		color.Dim("=>"),
+		color.Magenta("parse error"),
 	)
 
 	gutter := color.Dim("    |")
@@ -63,8 +63,8 @@ func (e *ParseError) String() string {
 	}
 
 	fmt.Fprintf(&b, "\n%s %s",
-		    color.Dim("=>"),
-		    color.Yellow("reason:")+" "+e.Msg,
+		color.Dim("=>"),
+		color.Yellow("reason:")+" "+e.Msg,
 	)
 	return b.String()
 }
@@ -132,6 +132,12 @@ func withPos(n []any, line, col int) []any {
 	return append(n, line, col)
 }
 
+// withNames: node = [...base..., namePositions, line, col]
+// nodePos still reads the last two ints. Name positions are at len-3.
+func withNames(n []any, names [][2]int, line, col int) []any {
+	return append(n, names, line, col)
+}
+
 // ---------- token plumbing ----------
 
 func (p *Parser) first(j int) (int, lexer.Token) {
@@ -173,29 +179,34 @@ func (p *Parser) Eat(kind string) lexer.Token {
 	tok := p.Peek()
 	if tok.Kind != kind {
 		p.errAtCode(tok, "E_EXPECTED",
-			    fmt.Sprintf("expected %s, got %s", kind, tok.Kind))
+			fmt.Sprintf("expected %s, got %s", kind, tok.Kind))
 		return tok
 	}
 	return p.Advance()
 }
 
 func (p *Parser) EatIdent() string {
+	s, _, _ := p.EatIdentPos()
+	return s
+}
+
+func (p *Parser) EatIdentPos() (string, int, int) {
 	tok := p.Peek()
 	if tok.Kind != "IDENT" {
 		p.errAtCode(tok, "E_EXPECTED_IDENT",
-			    fmt.Sprintf("expected identifier, got %s", tok.Kind))
-		return ""
+			fmt.Sprintf("expected identifier, got %s", tok.Kind))
+		return "", 0, 0
 	}
 	p.Advance()
 	s, _ := tok.Value.(string)
-	return s
+	return s, tok.Line, tok.Col
 }
 
 func (p *Parser) EatString() string {
 	tok := p.Peek()
 	if tok.Kind != "STRING" {
 		p.errAtCode(tok, "E_EXPECTED_STRING",
-			    fmt.Sprintf("expected string, got %s", tok.Kind))
+			fmt.Sprintf("expected string, got %s", tok.Kind))
 		return ""
 	}
 	p.Advance()
@@ -208,7 +219,7 @@ func (p *Parser) isTerm() bool {
 }
 
 func (p *Parser) skipNewlines() {
-	for p.At("NEWLINE") {
+	for p.At("NEWLINE") || p.At(";") {
 		p.Advance()
 	}
 }
@@ -309,9 +320,12 @@ func (p *Parser) ParseTopDecl() any {
 	if p.At("CONST") {
 		return p.parseTopConst()
 	}
-	p.errAtCode(p.Peek(), "E_DECL",
-		    fmt.Sprintf("expected declaration, got %s", p.Peek().Kind))
-	return nil
+	line, col := p.pos()
+	st := p.parseStmt()
+	if p.synced() || st == nil {
+		return nil
+	}
+	return withPos([]any{"TopStmt", []any{st}}, line, col)
 }
 
 // ---------- types ----------
@@ -396,8 +410,9 @@ func (p *Parser) parseInterface() any {
 	if p.synced() {
 		return nil
 	}
+	line, col := p.pos()
 	p.Eat("INTERFACE")
-	name := p.EatIdent()
+	name, nl, nc := p.EatIdentPos()
 	p.Eat("{")
 	var methods []any
 	p.skipNewlines()
@@ -439,15 +454,16 @@ func (p *Parser) parseInterface() any {
 	if p.synced() {
 		return nil
 	}
-	return []any{"InterfaceDecl", name, methods}
+	return withNames([]any{"InterfaceDecl", name, methods}, [][2]int{{nl, nc}}, line, col)
 }
 
 func (p *Parser) parseStruct() any {
 	if p.synced() {
 		return nil
 	}
+	line, col := p.pos()
 	p.Eat("STRUCT")
-	name := p.EatIdent()
+	name, nl, nc := p.EatIdentPos()
 	p.Eat("{")
 	var fields []any
 	p.skipNewlines()
@@ -468,14 +484,17 @@ func (p *Parser) parseStruct() any {
 	if p.synced() {
 		return nil
 	}
-	return []any{"StructDecl", name, fields}
+	return withNames([]any{"StructDecl", name, fields}, [][2]int{{nl, nc}}, line, col)
 }
 
 func (p *Parser) parseParam() []any {
-	names := []string{p.EatIdent()}
+	name, nl, nc := p.EatIdentPos()
 	if p.synced() {
 		return nil
 	}
+	names := []string{name}
+	positions := [][2]int{{nl, nc}}
+
 	if !p.At(",") {
 		variadic := false
 		if p.At("...") {
@@ -486,11 +505,13 @@ func (p *Parser) parseParam() []any {
 		if p.synced() {
 			return nil
 		}
-		return []any{[]any{"Param", names[0], ty, variadic}}
+		return []any{[]any{"Param", names[0], ty, variadic, positions}}
 	}
 	for p.At(",") {
 		p.Advance()
-		names = append(names, p.EatIdent())
+		n, l, c := p.EatIdentPos()
+		names = append(names, n)
+		positions = append(positions, [2]int{l, c})
 		if p.synced() {
 			return nil
 		}
@@ -505,8 +526,8 @@ func (p *Parser) parseParam() []any {
 		return nil
 	}
 	params := make([]any, 0, len(names))
-	for _, n := range names {
-		params = append(params, []any{"Param", n, ty, variadic})
+	for i, n := range names {
+		params = append(params, []any{"Param", n, ty, variadic, [][2]int{positions[i]}})
 	}
 	return params
 }
@@ -515,15 +536,23 @@ func (p *Parser) parseFn() any {
 	if p.synced() {
 		return nil
 	}
+	line, col := p.pos()
 	p.Eat("FUNC")
 
 	recv := ""
-	first := p.EatIdent()
+	var recvPos, namePos [2]int
+
+	first, fl, fc := p.EatIdentPos()
+	namePos = [2]int{fl, fc}
 	name := first
+
 	if p.At(".") {
 		p.Advance()
 		recv = first
-		name = p.EatIdent()
+		recvPos = [2]int{fl, fc}
+		n, nl, nc := p.EatIdentPos()
+		name = n
+		namePos = [2]int{nl, nc}
 	}
 	if p.synced() {
 		return nil
@@ -568,56 +597,96 @@ func (p *Parser) parseFn() any {
 		return nil
 	}
 	if recv != "" {
-		return []any{"MethodDecl", recv, name, params, ret, errTy, body}
+		// names = [method name, receiver name (= self position)]
+		return withNames(
+			[]any{"MethodDecl", recv, name, params, ret, errTy, body},
+			[][2]int{namePos, recvPos}, line, col)
 	}
-	return []any{"FnDecl", name, params, ret, errTy, body}
+	return withNames(
+		[]any{"FnDecl", name, params, ret, errTy, body},
+		[][2]int{namePos}, line, col)
 }
 
 func (p *Parser) parseTopLet() any {
 	line, col := p.pos()
 	p.Eat("LET")
 
-	names := []string{p.EatIdent()}
+	names := []string{}
+	positions := [][2]int{}
+	n, nl, nc := p.EatIdentPos()
+	names = append(names, n)
+	positions = append(positions, [2]int{nl, nc})
 	for !p.synced() && p.At(",") {
 		p.Advance()
-		names = append(names, p.EatIdent())
+		n, nl, nc := p.EatIdentPos()
+		names = append(names, n)
+		positions = append(positions, [2]int{nl, nc})
 	}
 	if p.synced() {
 		return nil
 	}
 
-	var ty, expr any
+	var ty, expr, els any
+
+	parseElse := func() {
+		if p.synced() || !p.At("ELSE") {
+			return
+		}
+		p.Advance()
+		p.skipNewlines()
+		els = p.parseBlock()
+	}
+
 	if p.At("=") {
 		p.Advance()
 		expr = p.parseExpr()
+		parseElse()
 	} else if len(names) == 1 && !p.isTerm() {
 		ty = p.parseType()
 		if p.At("=") {
 			p.Advance()
 			expr = p.parseExpr()
+			parseElse()
 		}
 	}
 	if p.synced() {
 		return nil
 	}
+
+	if els != nil {
+		if len(names) != 1 {
+			p.errAtCode(p.Peek(), "E_LET_ELSE_MULTI",
+				"let-else does not support multiple names")
+			return nil
+		}
+		inner := withNames(
+			[]any{"LetStmt", names, ty, expr, els},
+			positions, line, col)
+		return withPos([]any{"TopStmt", []any{inner}}, line, col)
+	}
+
 	if expr == nil && ty == nil {
 		p.errAtCode(p.Peek(), "E_TOP_LET",
-			    "top-level let needs a type or initializer")
+			"top-level let needs a type or initializer")
 		return nil
 	}
-	return withPos([]any{"TopLet", names, ty, expr}, line, col)
+	return withNames(
+		[]any{"TopLet", names, ty, expr},
+		positions, line, col)
 }
 
 func (p *Parser) parseTopConst() any {
 	line, col := p.pos()
 	p.Eat("CONST")
-	name := p.EatIdent()
+	name, nl, nc := p.EatIdentPos()
 	p.Eat("=")
 	expr := p.parseExpr()
 	if p.synced() {
 		return nil
 	}
-	return withPos([]any{"TopConst", name, expr}, line, col)
+	return withNames(
+		[]any{"TopConst", name, expr},
+		[][2]int{{nl, nc}}, line, col)
 }
 
 // ---------- statements ----------
@@ -711,10 +780,16 @@ func (p *Parser) parseLet() any {
 	line, col := p.pos()
 	p.Eat("LET")
 
-	names := []string{p.EatIdent()}
+	names := []string{}
+	positions := [][2]int{}
+	n, nl, nc := p.EatIdentPos()
+	names = append(names, n)
+	positions = append(positions, [2]int{nl, nc})
 	for !p.synced() && p.At(",") {
 		p.Advance()
-		names = append(names, p.EatIdent())
+		n, nl, nc := p.EatIdentPos()
+		names = append(names, n)
+		positions = append(positions, [2]int{nl, nc})
 	}
 
 	var ty, expr, els any
@@ -745,27 +820,31 @@ func (p *Parser) parseLet() any {
 	}
 	if len(names) > 1 && expr == nil {
 		p.errAtCode(p.Peek(), "E_LET_MULTI",
-			    "multiple-name let requires an initializer")
+			"multiple-name let requires an initializer")
 		return nil
 	}
 	if els != nil && len(names) > 1 {
 		p.errAtCode(p.Peek(), "E_LET_ELSE_MULTI",
-			    "let-else does not support multiple names")
+			"let-else does not support multiple names")
 		return nil
 	}
-	return withPos([]any{"LetStmt", names, ty, expr, els}, line, col)
+	return withNames(
+		[]any{"LetStmt", names, ty, expr, els},
+		positions, line, col)
 }
 
 func (p *Parser) parseConst() any {
 	line, col := p.pos()
 	p.Eat("CONST")
-	name := p.EatIdent()
+	name, nl, nc := p.EatIdentPos()
 	p.Eat("=")
 	expr := p.parseExpr()
 	if p.synced() {
 		return nil
 	}
-	return withPos([]any{"ConstStmt", name, expr}, line, col)
+	return withNames(
+		[]any{"ConstStmt", name, expr},
+		[][2]int{{nl, nc}}, line, col)
 }
 
 func (p *Parser) parseReturn() any {
@@ -1019,70 +1098,72 @@ func (p *Parser) parsePostfix() any {
 	}
 	for {
 		switch {
-			case p.At("("):
-				line, col := p.pos()
-				p.Eat("(")
-				p.br++
-				var args []any
-				if !p.At(")") {
+		case p.At("("):
+			line, col := p.pos()
+			p.Eat("(")
+			p.br++
+			var args []any
+			if !p.At(")") {
+				args = append(args, p.parseCallArg())
+				for !p.synced() && p.At(",") {
+					p.Advance()
 					args = append(args, p.parseCallArg())
-					for !p.synced() && p.At(",") {
-						p.Advance()
-						args = append(args, p.parseCallArg())
-					}
 				}
-				p.Eat(")")
+			}
+			p.Eat(")")
+			p.br--
+			if p.synced() {
+				return nil
+			}
+			e = withPos([]any{"CallExpr", e, args}, line, col)
+		case p.At("."):
+			line, col := p.pos()
+			p.Advance()
+			name, nl, nc := p.EatIdentPos()
+			if p.synced() {
+				return nil
+			}
+			e = withNames(
+				[]any{"SelectorExpr", e, name},
+				[][2]int{{nl, nc}}, line, col)
+		case p.At("["):
+			line, col := p.pos()
+			p.Advance()
+			p.br++
+			var lo any
+			if !p.At(":") {
+				lo = p.parseExpr()
+			}
+			if p.synced() {
+				p.br--
+				return nil
+			}
+			if p.At(":") {
+				p.Advance()
+				var hi any
+				if !p.At("]") {
+					hi = p.parseExpr()
+				}
+				p.Eat("]")
 				p.br--
 				if p.synced() {
 					return nil
 				}
-				e = withPos([]any{"CallExpr", e, args}, line, col)
-			case p.At("."):
-				line, col := p.pos()
-				p.Advance()
-				name := p.EatIdent()
+				e = withPos([]any{"SliceExpr", e, lo, hi}, line, col)
+			} else {
+				p.Eat("]")
+				p.br--
 				if p.synced() {
 					return nil
 				}
-				e = withPos([]any{"SelectorExpr", e, name}, line, col)
-			case p.At("["):
-				line, col := p.pos()
-				p.Advance()
-				p.br++
-				var lo any
-				if !p.At(":") {
-					lo = p.parseExpr()
-				}
-				if p.synced() {
-					p.br--
-					return nil
-				}
-				if p.At(":") {
-					p.Advance()
-					var hi any
-					if !p.At("]") {
-						hi = p.parseExpr()
-					}
-					p.Eat("]")
-					p.br--
-					if p.synced() {
-						return nil
-					}
-					e = withPos([]any{"SliceExpr", e, lo, hi}, line, col)
-				} else {
-					p.Eat("]")
-					p.br--
-					if p.synced() {
-						return nil
-					}
-					e = withPos([]any{"IndexExpr", e, lo}, line, col)
-				}
-			case p.At("++") || p.At("--"):
-				line, col := p.pos()
-				op := p.Advance().Kind
-				e = withPos([]any{"PostfixExpr", op, e}, line, col)
-			default:
-				return e
+				e = withPos([]any{"IndexExpr", e, lo}, line, col)
+			}
+		case p.At("++") || p.At("--"):
+			line, col := p.pos()
+			op := p.Advance().Kind
+			e = withPos([]any{"PostfixExpr", op, e}, line, col)
+		default:
+			return e
 		}
 	}
 }
@@ -1165,29 +1246,29 @@ func (p *Parser) parsePattern() any {
 
 	var lo any
 	switch tok.Kind {
-		case "INT", "BYTE":
+	case "INT", "BYTE":
+		p.Advance()
+		lo = tok.Value
+	case "FLOAT":
+		p.Advance()
+		lo = tok.Value
+	case "STRING":
+		p.Advance()
+		lo = tok.Value
+	case "IDENT":
+		name, _ := tok.Value.(string)
+		if name == "true" || name == "false" {
 			p.Advance()
-			lo = tok.Value
-		case "FLOAT":
-			p.Advance()
-			lo = tok.Value
-		case "STRING":
-			p.Advance()
-			lo = tok.Value
-		case "IDENT":
-			name, _ := tok.Value.(string)
-			if name == "true" || name == "false" {
-				p.Advance()
-				lo = (name == "true")
-			} else {
-				p.errAtCode(tok, "E_PATTERN",
-					    fmt.Sprintf("expected pattern, got %s", name))
-				return nil
-			}
-		default:
+			lo = (name == "true")
+		} else {
 			p.errAtCode(tok, "E_PATTERN",
-				    fmt.Sprintf("expected pattern, got %s", tok.Kind))
+				fmt.Sprintf("expected pattern, got %s", name))
 			return nil
+		}
+	default:
+		p.errAtCode(tok, "E_PATTERN",
+			fmt.Sprintf("expected pattern, got %s", tok.Kind))
+		return nil
 	}
 
 	if p.At("..") {
@@ -1195,16 +1276,16 @@ func (p *Parser) parsePattern() any {
 		tok = p.Peek()
 		var hi any
 		switch tok.Kind {
-			case "INT", "BYTE":
-				p.Advance()
-				hi = tok.Value
-			case "FLOAT":
-				p.Advance()
-				hi = tok.Value
-			default:
-				p.errAtCode(tok, "E_RANGE_END",
-					    fmt.Sprintf("expected range end, got %s", tok.Kind))
-				return nil
+		case "INT", "BYTE":
+			p.Advance()
+			hi = tok.Value
+		case "FLOAT":
+			p.Advance()
+			hi = tok.Value
+		default:
+			p.errAtCode(tok, "E_RANGE_END",
+				fmt.Sprintf("expected range end, got %s", tok.Kind))
+			return nil
 		}
 		return withPos([]any{"RangePattern", lo, hi}, line, col)
 	}
@@ -1217,57 +1298,57 @@ func (p *Parser) parsePrimary() any {
 	}
 	tok := p.Peek()
 	switch tok.Kind {
-		case "INT":
-			p.Advance()
-			return withPos([]any{"IntExpr", tok.Value}, tok.Line, tok.Col)
-		case "FLOAT":
-			p.Advance()
-			return withPos([]any{"FloatExpr", tok.Value}, tok.Line, tok.Col)
-		case "BYTE":
-			p.Advance()
-			return withPos([]any{"ByteExpr", tok.Value}, tok.Line, tok.Col)
-		case "STRING":
-			p.Advance()
-			return withPos([]any{"StrExpr", tok.Value}, tok.Line, tok.Col)
-		case "(":
-			p.Eat("(")
-			p.br++
-			e := p.parseExpr()
-			p.Eat(")")
-			p.br--
-			if p.synced() {
-				return nil
-			}
-			return e
-		case "[":
-			return p.parseListOrComp()
-		case "{":
-			return p.parseSetOrComp()
-		case "MAP":
-			return p.parseMapLit()
-		case "IDENT":
-			name, _ := tok.Value.(string)
-			p.Advance()
-			if name == "true" {
-				return withPos([]any{"BoolExpr", true}, tok.Line, tok.Col)
-			}
-			if name == "false" {
-				return withPos([]any{"BoolExpr", false}, tok.Line, tok.Col)
-			}
-			if name == "nil" {
-				return withPos([]any{"NilExpr"}, tok.Line, tok.Col)
-			}
-			if p.At("{") && p.noStructLit == 0 {
-				return p.parseStructLit(name, tok.Line, tok.Col)
-			}
-			return withPos([]any{"IdentExpr", name}, tok.Line, tok.Col)
-		case "FUNC":
-			return p.parseFnLit()
-		case "MATCH":
-			return p.parseMatch()
+	case "INT":
+		p.Advance()
+		return withPos([]any{"IntExpr", tok.Value}, tok.Line, tok.Col)
+	case "FLOAT":
+		p.Advance()
+		return withPos([]any{"FloatExpr", tok.Value}, tok.Line, tok.Col)
+	case "BYTE":
+		p.Advance()
+		return withPos([]any{"ByteExpr", tok.Value}, tok.Line, tok.Col)
+	case "STRING":
+		p.Advance()
+		return withPos([]any{"StrExpr", tok.Value}, tok.Line, tok.Col)
+	case "(":
+		p.Eat("(")
+		p.br++
+		e := p.parseExpr()
+		p.Eat(")")
+		p.br--
+		if p.synced() {
+			return nil
+		}
+		return e
+	case "[":
+		return p.parseListOrComp()
+	case "{":
+		return p.parseSetOrComp()
+	case "MAP":
+		return p.parseMapLit()
+	case "IDENT":
+		name, _ := tok.Value.(string)
+		p.Advance()
+		if name == "true" {
+			return withPos([]any{"BoolExpr", true}, tok.Line, tok.Col)
+		}
+		if name == "false" {
+			return withPos([]any{"BoolExpr", false}, tok.Line, tok.Col)
+		}
+		if name == "nil" {
+			return withPos([]any{"NilExpr"}, tok.Line, tok.Col)
+		}
+		if p.At("{") && p.noStructLit == 0 {
+			return p.parseStructLit(name, tok.Line, tok.Col)
+		}
+		return withPos([]any{"IdentExpr", name}, tok.Line, tok.Col)
+	case "FUNC":
+		return p.parseFnLit()
+	case "MATCH":
+		return p.parseMatch()
 	}
 	p.errAtCode(tok, "E_PRIMARY",
-		    fmt.Sprintf("unexpected token %s", tok.Kind))
+		fmt.Sprintf("unexpected token %s", tok.Kind))
 	return nil
 }
 
@@ -1418,49 +1499,49 @@ func (p *Parser) compVar(e any) string {
 		return ""
 	}
 	switch n[0].(string) {
-		case "IdentExpr":
-			return n[1].(string)
-		case "BinaryExpr":
-			if r := p.compVar(n[2]); r != "" {
+	case "IdentExpr":
+		return n[1].(string)
+	case "BinaryExpr":
+		if r := p.compVar(n[2]); r != "" {
+			return r
+		}
+		return p.compVar(n[3])
+	case "UnaryExpr":
+		return p.compVar(n[2])
+	case "CallExpr":
+		if r := p.compVar(n[1]); r != "" {
+			return r
+		}
+		for _, a := range n[2].([]any) {
+			if r := p.compVar(a); r != "" {
 				return r
 			}
-			return p.compVar(n[3])
-		case "UnaryExpr":
-			return p.compVar(n[2])
-		case "CallExpr":
-			if r := p.compVar(n[1]); r != "" {
-				return r
-			}
-			for _, a := range n[2].([]any) {
-				if r := p.compVar(a); r != "" {
-					return r
-				}
-			}
-		case "IndexExpr":
-			if r := p.compVar(n[1]); r != "" {
-				return r
-			}
-			return p.compVar(n[2])
-		case "SliceExpr":
-			if r := p.compVar(n[1]); r != "" {
-				return r
-			}
-			if r := p.compVar(n[2]); r != "" {
-				return r
-			}
-			return p.compVar(n[3])
-		case "SelectorExpr":
-			return p.compVar(n[1])
+		}
+	case "IndexExpr":
+		if r := p.compVar(n[1]); r != "" {
+			return r
+		}
+		return p.compVar(n[2])
+	case "SliceExpr":
+		if r := p.compVar(n[1]); r != "" {
+			return r
+		}
+		if r := p.compVar(n[2]); r != "" {
+			return r
+		}
+		return p.compVar(n[3])
+	case "SelectorExpr":
+		return p.compVar(n[1])
 	}
 	return ""
 }
 
 func (p *Parser) parseCompAfterFirst(nodeKind string, fullTy any, elem any) any {
-	p.Advance() // @
+	p.Advance()
 	varName := p.compVar(elem)
 	if varName == "" {
 		p.errAtCode(p.Peek(), "E_COMP_VAR",
-			    "comprehension element must reference a loop variable")
+			"comprehension element must reference a loop variable")
 		return nil
 	}
 

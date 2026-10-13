@@ -184,7 +184,7 @@ img { max-width: 100%; height: auto; }
     <div class="report-meta">
         <strong>Tác giả:</strong> Trần Trung Nghĩa (technical leader, 10A6) — Trần Đào Gia Minh (web designer, 12A1)<br>
         <strong>Đơn vị:</strong> Trường THPT Nguyễn Thần Hiến<br>
-        <strong>Phiên bản:</strong> 26.10 (năm 2026)
+        <strong>Phiên bản:</strong> 26.11 (năm 2026)
     </div>
 </header>
 
@@ -392,10 +392,10 @@ varDecl       = "let" , identifier , [ type ] , "=" , expr ;
 constDecl     = "const" , identifier , [ type ] , "=" , expr ;
 
 (* ===== Hàm ===== *)
-function      = "func" , identifier , "(" , [ params ] , ")" ,
+function      = "func" , identifier , "(" , [ params ] , ")" , "->" ,
                 [ type ] , block ;
 method        = "func" , "(" , receiverType , ")" , methodName ,
-                "(" , [ params ] , ")" , [ type ] , block ;
+                "(" , [ params ] , ")" , "->" , [ type ] , block ;
 receiverType  = identifier ;
 methodName    = identifier ;
 
@@ -407,7 +407,7 @@ structDecl    = "struct" , identifier , "{" , { field } , "}" ;
 field         = identifier , type ;
 
 interfaceDecl = "interface" , identifier , "{" , { methodSig } , "}" ;
-methodSig     = identifier , "(" , [ params ] , ")" , [ type ] ;
+methodSig     = identifier , "(" , [ params ] , ")" , "->" , [ type ] ;
 
 (* ===== Khối lệnh ===== *)
 block         = "{" , { statement } , "}" ;
@@ -463,7 +463,7 @@ primary       = literal
               | listLit
               | compLit ;
 
-lambdaExpr    = "func" , "(" , [ params ] , ")" , [ type ] , block ;
+lambdaExpr    = "func" , "(" , [ params ] , ")" , "->" , [ type ] , block ;
 
 (* ===== CAST ===== *)
 (* Cú pháp giống function call, ngữ nghĩa là ép kiểu *)
@@ -482,7 +482,7 @@ compLit = "[]" , type , "{" , expr , "@" , expr ,
 
 (* ===== Kiểu ===== *)
 type          = primitiveType | listType | mapType ;
-primitiveType = "int" | "float" | "string" | "bool" | "byte" | "any" ;
+primitiveType = "int" | "float" | "string" | "bool" | "byte" | "nil" | "any" ;
 listType      = "[]" , type ;
 mapType       = "map" , "[" , type , "]" , type ;
 

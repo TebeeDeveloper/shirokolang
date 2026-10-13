@@ -19,6 +19,7 @@ type Interpreter struct {
 
 	pendingFns map[fnKey]*Function
 
+	In    io.Reader
 	Out   io.Writer
 	Trace bool
 
@@ -40,6 +41,7 @@ func New(out io.Writer) *Interpreter {
 		Schemas:     map[string]*StructSchema{},
 		Methods:     map[string]map[string]Value{},
 		pendingFns:  map[fnKey]*Function{},
+		In:          os.Stdin,
 		Out:         out,
 		mem:         make([]Value, 0, 1<<16),
 	}

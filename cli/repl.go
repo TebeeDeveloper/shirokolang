@@ -17,14 +17,10 @@ import (
 
 // ---------- stdlib / completion tables ----------
 
-// replStdPkgs are the stdlib packages the REPL auto-imports when the
-// accumulated source references them via "<pkg>.".
 var replStdPkgs = []string{
 	"fmt", "strings", "strconv", "os", "math", "sort",
 }
 
-// replPkgMembers lists the stdlib members the completer suggests
-// after a dot. Kept manually in sync with interpreter.installBuiltins.
 var replPkgMembers = map[string][]string{
 	"fmt":     {"errorf", "print", "printf", "println", "sprintf", "sprintln"},
 	"strings": {"contains", "has_prefix", "has_suffix", "index", "join", "repeat", "split", "to_lower", "to_upper", "trim"},
@@ -46,10 +42,7 @@ var replBuiltins = []string{
 	"sprintf", "sprintln", "string",
 }
 
-// replShimTypes are the fmt aliases the REPL binds at top level. Sema
-// sees real signatures; the interpreter gets matching globals via
-// BindPackageMember. No source-level shim is emitted — spread (`...`)
-// isn't supported by the register VM.
+// replShimTypes are the fmt aliases the REPL binds at top level.
 var replShimTypes = map[string]sema.Type{
 	"print":    {"fn", []sema.Type{sema.TAny}, sema.TVoid, true},
 	"println":  {"fn", []sema.Type{sema.TAny}, sema.TVoid, true},
@@ -60,9 +53,6 @@ var replShimTypes = map[string]sema.Type{
 }
 
 // replBuiltinTypes exposes the runtime conversion builtins to sema.
-// The interpreter defines them in installBuiltins; without these
-// entries sema would only know them through the conversions map,
-// which handles `int(x)` but not `let f = int`.
 var replBuiltinTypes = map[string]sema.Type{
 	"int":    {"fn", []sema.Type{sema.TAny}, sema.TInt, false},
 	"float":  {"fn", []sema.Type{sema.TAny}, sema.TFloat, false},
@@ -72,9 +62,6 @@ var replBuiltinTypes = map[string]sema.Type{
 
 // ---------- entry point ----------
 
-// ReplCmd runs an interactive Shiroko session against a single
-// persistent interpreter. Globals, functions and structs survive
-// across inputs, like Python's REPL.
 func ReplCmd() error {
 	printReplBanner()
 
@@ -117,10 +104,6 @@ func ReplCmd() error {
 	}
 }
 
-// readInputMulti reads one logical input using the editor, adding
-// continuation prompts while brackets are unbalanced. Ctrl-C during
-// the first line returns an empty string (caller loops); Ctrl-C
-// during a continuation discards the whole input.
 func readInputMulti(ed *lineEditor) (string, error) {
 	line, err := ed.ReadLine(">> ")
 	if err != nil {
@@ -131,7 +114,7 @@ func readInputMulti(ed *lineEditor) (string, error) {
 	}
 	buf := line
 	for braceDepth(buf) > 0 {
-		next, err := ed.ReadLine("..." + strings.Repeat("    ", braceDepth(buf)))
+		next, err := ed.ReadLine("..." + strings.Repeat(" ", braceDepth(buf)))
 		if err != nil {
 			return buf, err
 		}
@@ -143,8 +126,6 @@ func readInputMulti(ed *lineEditor) (string, error) {
 	return buf, nil
 }
 
-// braceDepth counts ()[]{} outside strings and comments. Used to
-// decide whether the REPL should keep reading input.
 func braceDepth(s string) int {
 	depth := 0
 	i := 0
@@ -205,9 +186,6 @@ func braceDepth(s string) int {
 
 // ---------- session state ----------
 
-// replState pairs a live interpreter (persistent globals) with the
-// source text of every accumulated top-level declaration, so each new
-// input can be re-sema'd with full context.
 type replState struct {
 	ip        *interpreter.Interpreter
 	declLines []string
@@ -255,23 +233,192 @@ func (r *replState) eval(line string) error {
 	return r.evalInline(line)
 }
 
-// addDecl handles a top-level declaration line. If the line is a
-// `let <name> = <[]T|{}T>{...comp...}` form, it's split into a
-// declare step + an assign step, because the lowerer's TopLet path
-// uses l.lowerExpr, which rejects comprehension/range nodes.
-// AssignStmt handles them fine.
+// evalInline evaluates a non-declaration input. Three attempts, in
+// order:
+//
+//  1. Block wrapper, if the input is `{ ... }`.
+//  2. Value wrapper: `let __v = <line>; return __v`. Handles plain
+//     expressions and comprehensions/ranges. Auto-prints if __v's
+//     inferred type isn't void.
+//  3. Statement wrapper: `func __repl__() { <line> }`. No output.
+func (r *replState) evalInline(line string) error {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") && len(trimmed) >= 2 {
+		if err := r.evalBlock(trimmed); err == nil {
+			return nil
+		}
+	}
+	if err := r.tryValueWrap(line); err == nil {
+		return nil
+	}
+	return r.execStatement(line)
+}
+
+// evalBlock handles `{ <stmts> }` as a scoped block. If the last
+// statement is a non-void expression, it becomes the block's value and
+// is auto-printed.
+func (r *replState) evalBlock(block string) error {
+	inner := strings.TrimSpace(block[1 : len(block)-1])
+
+	// Parse as a void function to inspect the statement list.
+	wrap := "func __repl__() {\n" + inner + "\n}\n"
+	prog, s, fn, err := r.parseSemaWrap(wrap)
+	if err != nil {
+		return err
+	}
+	stmts := functionStmts(fn)
+	if len(stmts) == 0 {
+		return r.runFn(prog, s, fn, false)
+	}
+
+	last, _ := stmts[len(stmts)-1].([]any)
+	if last == nil || last[0].(string) != "ExprStmt" {
+		return r.runFn(prog, s, fn, false)
+	}
+	expr := last[1]
+	ty := s.TypeOf(expr)
+	if ty == nil || sema.IsVoid(ty) {
+		return r.runFn(prog, s, fn, false)
+	}
+
+	// Rewrite the last ExprStmt as a return and rebuild the function
+	// with return type `any`.
+	newStmts := append([]any{}, stmts[:len(stmts)-1]...)
+	newStmts = append(newStmts, []any{"ReturnStmt", []any{expr}})
+	newFn := []any{
+		"FnDecl", "__repl__",
+		[]any{},
+		[]any{"NamedType", "any"},
+		nil,
+		[]any{"Block", newStmts},
+	}
+	newProg := replaceFn(prog, newFn)
+
+	// Sema the modified program from scratch. The new AST nodes we
+	// built lack position info, so errors here will report line 0
+	// — acceptable for an internal wrapper.
+	srcObj := source.New(r.mkSrc(wrap))
+	s2 := sema.New(srcObj)
+	installSemaShims(s2, newProg)
+	if errs := s2.Analyze(newProg); len(errs) > 0 {
+		return cnv.SemaError(errs)
+	}
+	return r.runFn(newProg, s2, newFn, true)
+}
+
+// tryValueWrap tries `let __v = <line>; return __v`. Handles plain
+// expressions and comprehensions/ranges in one go. Returns errVoidInput
+// if the wrapper type-checks but __v has void type, or a parse/sema
+// error if the input isn't a value at all.
+func (r *replState) tryValueWrap(line string) error {
+	wrap := "func __repl__() -> any {\nlet __v = " + line + "\nreturn __v\n}\n"
+	prog, s, fn, err := r.parseSemaWrap(wrap)
+	if err != nil {
+		return err
+	}
+	ty := s.LocalType(fn, "__v")
+	if ty == nil || sema.IsVoid(ty) {
+		return errVoidInput
+	}
+	return r.runFn(prog, s, fn, true)
+}
+
+// execStatement runs `line` as the body of a void synthetic function.
+// Assignments to globals persist; locals are discarded.
+func (r *replState) execStatement(line string) error {
+	wrap := "func __repl__() {\n" + line + "\n}\n"
+	prog, s, fn, err := r.parseSemaWrap(wrap)
+	if err != nil {
+		return err
+	}
+	return r.runFn(prog, s, fn, false)
+}
+
+// parseSemaWrap parses + semas the wrapper and returns the synthetic
+// function decl along with the sema that analyzed it.
+func (r *replState) parseSemaWrap(wrap string) ([]any, *sema.Sema, []any, error) {
+	src := r.mkSrc(wrap)
+	prog, s, err := r.parseAndSema(src)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	fn := findFn(prog, "__repl__")
+	if fn == nil {
+		return nil, nil, nil, errNoWrapper
+	}
+	return prog, s, fn, nil
+}
+
+// runFn lowers the synthetic function only, Exec's it, calls it, and
+// (if print) displays the return value. The function is removed from
+// globals afterwards so it doesn't leak between inputs.
+func (r *replState) runFn(prog []any, s *sema.Sema, fn []any, print bool) error {
+	lw := lower.New(s)
+	ir, lerrs := lw.LowerProgram([]any{"Program", prog[1], prog[2], []any{fn}})
+	if len(lerrs) > 0 {
+		return cnv.LowerError(lerrs)
+	}
+	if _, err := r.ip.Exec(ir); err != nil {
+		return err
+	}
+	defer delete(r.ip.GlobalNames, "__repl__")
+
+	v, err := r.ip.CallGlobal("__repl__")
+	if err != nil {
+		return err
+	}
+	if print {
+		fmt.Println(interpreter.Display(v))
+	}
+	return nil
+}
+
+var (
+	errNoWrapper = fmt.Errorf("internal: wrapper function missing")
+	errVoidInput = fmt.Errorf("void input")
+)
+
+// functionStmts returns the statement list of a parsed function body.
+func functionStmts(fn []any) []any {
+	if len(fn) < 6 {
+		return nil
+	}
+	body, ok := fn[5].([]any)
+	if !ok || len(body) < 2 {
+		return nil
+	}
+	stmts, _ := body[1].([]any)
+	return stmts
+}
+
+// replaceFn rewrites the program's decls, substituting __repl__ with
+// the given node.
+func replaceFn(prog []any, newFn []any) []any {
+	decls, _ := prog[3].([]any)
+	out := make([]any, 0, len(decls))
+	for _, d := range decls {
+		dd, ok := d.([]any)
+		if ok && len(dd) > 1 && dd[0].(string) == "FnDecl" && dd[1].(string) == "__repl__" {
+			out = append(out, newFn)
+		} else {
+			out = append(out, d)
+		}
+	}
+	return []any{"Program", prog[1], prog[2], out}
+}
+
+// ---------- declarations ----------
+
 func (r *replState) addDecl(line string) error {
 	if name, ty, rhs, ok := splitLetComp(line); ok {
 		if err := r.addDeclPlain("let " + name + " " + ty); err != nil {
 			return err
 		}
-		return r.evalStmt(name + " = " + rhs)
+		return r.evalInline(name + " = " + rhs)
 	}
 	return r.addDeclPlain(line)
 }
 
-// addDeclPlain is the accumulate-and-replace logic for ordinary
-// declarations.
 func (r *replState) addDeclPlain(line string) error {
 	name, hasName := declName(line)
 	replaceIdx := -1
@@ -302,9 +449,6 @@ func (r *replState) addDeclPlain(line string) error {
 	return nil
 }
 
-// execNewDecl rebuilds the full program (accumulated decls) for
-// type-checking, but Exec's only the last declaration so the
-// persistent interpreter doesn't re-run earlier initializers.
 func (r *replState) execNewDecl() error {
 	if len(r.declLines) == 0 {
 		return nil
@@ -329,125 +473,8 @@ func (r *replState) execNewDecl() error {
 	return err
 }
 
-// evalInline decides between expression and statement.
-//
-// Expression path (auto-print):
-//
-//	func __repl__() -> any {
-//	    let __v = (<line>)
-//	    return __v
-//	}
-//
-// We inspect the LetStmt's expression via sema.TypeOf; if it resolves
-// to void or the wrapper fails to type-check as an expression, we
-// fall back to the statement wrapper.
-//
-// Comprehension / range input skips the paren wrap because the
-// grammar only accepts those forms on the RHS of a let or assign.
-func (r *replState) evalInline(line string) error {
-	if isCompLike(line) {
-		wrapper := "func __repl__() -> any {\nlet __v = " + line + "\nreturn __v\n}\n"
-		return r.evalWrapper(wrapper, true)
-	}
-
-	exprWrapper := "func __repl__() -> any {\nlet __v = (" + line + ")\nreturn __v\n}\n"
-	if err := r.evalWrapper(exprWrapper, true); err == nil {
-		return nil
-	}
-	return r.evalStmt(line)
-}
-
-// evalStmt runs `line` as the body of a synthetic void function.
-// Assignments to globals land in the live interpreter; locals inside
-// the wrapper are discarded.
-func (r *replState) evalStmt(line string) error {
-	wrapper := "func __repl__() {\n" + line + "\n}\n"
-	return r.evalWrapper(wrapper, false)
-}
-
-// evalWrapper parses, semas, lowers and Exec's the wrapper, then
-// calls it. If wantReturn is true, the wrapper's local `__v` must
-// have a non-void type — otherwise we bail so the caller can try the
-// statement path.
-func (r *replState) evalWrapper(wrapper string, wantReturn bool) error {
-	src := r.mkSrc(wrapper)
-	prog, s, err := r.parseAndSema(src)
-	if err != nil {
-		return err
-	}
-	fnDecl := findFn(prog, "__repl__")
-	if fnDecl == nil {
-		return fmt.Errorf("cannot parse input")
-	}
-
-	if wantReturn && !wrapperHasValueReturn(s, fnDecl) {
-		return errVoidInput
-	}
-
-	lw := lower.New(s)
-	ir, lerrs := lw.LowerProgram([]any{"Program", prog[1], prog[2], []any{fnDecl}})
-	if len(lerrs) > 0 {
-		return cnv.LowerError(lerrs)
-	}
-	if _, err := r.ip.Exec(ir); err != nil {
-		return err
-	}
-	defer delete(r.ip.GlobalNames, "__repl__")
-
-	v, err := r.ip.CallGlobal("__repl__")
-	if err != nil {
-		return err
-	}
-	if wantReturn {
-		fmt.Println(interpreter.Display(v))
-	}
-	return nil
-}
-
-var errVoidInput = fmt.Errorf("void input")
-
-// wrapperHasValueReturn inspects the synthetic expression wrapper
-// `let __v = (...) ; return __v` and asks sema what type __v's
-// initializer got. Anything non-void means the input was a real
-// expression worth auto-printing.
-func wrapperHasValueReturn(s *sema.Sema, fnDecl []any) bool {
-	body, ok := fnDecl[5].([]any)
-	if !ok || len(body) < 2 {
-		return false
-	}
-	stmts, ok := body[1].([]any)
-	if !ok || len(stmts) < 1 {
-		return false
-	}
-	letStmt, ok := stmts[0].([]any)
-	if !ok || len(letStmt) < 4 || letStmt[0].(string) != "LetStmt" {
-		return false
-	}
-	names, ok := letStmt[1].([]string)
-	if !ok || len(names) != 1 || names[0] != "__v" {
-		return false
-	}
-	expr := letStmt[3]
-	if expr == nil {
-		return false
-	}
-	ty := s.TypeOf(expr)
-	if ty == nil {
-		return false
-	}
-	if len(ty) == 1 && ty[0] == "void" {
-		return false
-	}
-	return true
-}
-
 // ---------- completion ----------
 
-// completeWord is the line editor's tab-completion hook.
-//
-//   - after a dot: members of the named stdlib package (fmt, strings, ...)
-//   - otherwise: keywords, builtin functions, std package names, and
-//     every name declared in the session
 func (r *replState) completeWord(word string) []string {
 	if word == "" {
 		return nil
@@ -540,9 +567,6 @@ func (r *replState) parseAndSema(src string) (prog []any, s *sema.Sema, err erro
 	return prog, s, nil
 }
 
-// installSemaShims wires fmt aliases and conversion builtins into
-// sema's global scope, skipping any name the user program has
-// declared itself so a user-defined `func print` isn't clobbered.
 func installSemaShims(s *sema.Sema, prog []any) {
 	declared := map[string]bool{}
 	if decls, ok := prog[3].([]any); ok {
@@ -564,9 +588,7 @@ func installSemaShims(s *sema.Sema, prog []any) {
 			continue
 		}
 		s.Globals.Symbols[name] = &sema.Symbol{
-			Name: name,
-			Kind: "func",
-			Type: ty,
+			Name: name, Kind: "func", Type: ty,
 		}
 	}
 	for name, ty := range replBuiltinTypes {
@@ -574,9 +596,7 @@ func installSemaShims(s *sema.Sema, prog []any) {
 			continue
 		}
 		s.Globals.Symbols[name] = &sema.Symbol{
-			Name: name,
-			Kind: "func",
-			Type: ty,
+			Name: name, Kind: "func", Type: ty,
 		}
 	}
 }
@@ -609,26 +629,12 @@ func isDeclLine(line string) bool {
 	return false
 }
 
-// isCompLike reports whether `line` starts with a list/set literal.
-// Comprehension and range syntax is only valid on the RHS of a let
-// or assignment, so the REPL wraps these without surrounding parens.
-func isCompLike(line string) bool {
-	if !strings.HasPrefix(line, "[]") && !strings.HasPrefix(line, "{}") {
-		return false
-	}
-	return strings.IndexByte(line, '{') > 0
-}
-
 // splitLetComp detects `let <name> = <[]T|{}T>{...}` where the body
 // contains comprehension or range syntax, and returns the pieces so
 // the REPL can issue a two-step declare + assign.
 //
-// Rationale: the lowerer's TopLet path uses l.lowerExpr, which rejects
-// comprehension/range nodes ("only valid on the RHS of a let/assign").
-// AssignStmt handles them fine, so we route through there.
-//
-// Plain list/set literals like `let x = []int{1, 2, 3}` are NOT
-// touched — they go through the normal TopLet path unchanged.
+// The lowerer's TopLet path uses l.lowerExpr, which rejects comp
+// nodes; AssignStmt handles them fine. So we route through there.
 func splitLetComp(line string) (name, ty, rhs string, ok bool) {
 	t := strings.TrimSpace(line)
 	if !strings.HasPrefix(t, "let ") {
@@ -655,8 +661,6 @@ func splitLetComp(line string) (name, ty, rhs string, ok bool) {
 		return "", "", "", false
 	}
 	body := rest[braceIdx:]
-	// Fire only for comp / range syntax. Plain literals go through
-	// the normal TopLet path, which handles them.
 	if !strings.Contains(body, "@") && !strings.Contains(body, "..") {
 		return "", "", "", false
 	}
@@ -666,10 +670,6 @@ func splitLetComp(line string) (name, ty, rhs string, ok bool) {
 	return name, ty, rhs, true
 }
 
-// declName extracts the name introduced by a top-level declaration
-// line, so the REPL can replace a re-declaration instead of letting
-// sema error on a duplicate. Methods and malformed lines return "",
-// false.
 func declName(line string) (string, bool) {
 	t := strings.TrimSpace(line)
 
@@ -779,8 +779,10 @@ Editing:
 Input rules:
   - let x = 1, func f(...) ..., struct S ..., interface I ...
     accumulate across inputs. Re-declaring the same name replaces it.
-  - anything else is evaluated as an expression and printed, or run
-    as a statement if it can't be one.
+  - bare expressions are evaluated and printed; statements run
+    without output. Assignments to globals persist.
+  - { ... } blocks scope their locals and auto-print the last
+    non-void expression if there is one.
   - []T{...} and {}T{...} comprehensions and ranges work at the top
     level; e.g. []int{x @ int+ | x % 2 == 0; x < 10}.
   - multi-line input is detected by unbalanced brackets; the REPL

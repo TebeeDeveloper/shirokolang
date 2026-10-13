@@ -592,7 +592,6 @@ func (c *fnCompiler) peephole() {
 					out = append(out, code[k])
 				}
 				cgPos := len(out)
-				oldToNew[i] = cgPos
 				oldToNew[j] = cgPos
 				out = append(out, Instr{OpCallGlobal, in.B, code[j].B, dst, 0})
 				i = j

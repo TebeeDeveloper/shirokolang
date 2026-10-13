@@ -10,7 +10,7 @@ func main() {
   match x {
     10 => { fmt.println("ten") }
     5..9 => { fmt.println("range 5-9") }
-    1..5 => fmt.println("range 4-9")
+    0..4 => fmt.println("range 0-4")
     _ => { fmt.println("other") }
   }
 

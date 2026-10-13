@@ -3,6 +3,7 @@ package sema
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"shiroko/core/color"
@@ -14,7 +15,7 @@ import (
 type SemaError struct {
 	Code string
 	Msg  string
-	Fix  string // optional "did you mean" hint; empty if none
+	Fix  string
 	Line int
 	Col  int
 	Src  *source.Source
@@ -35,9 +36,9 @@ func (e *SemaError) String() string {
 	}
 
 	fmt.Fprintf(&b, "%s %s %s",
-		    color.Yellow(loc),
-		    color.Dim("=>"),
-		    color.Magenta("sema error"),
+		color.Yellow(loc),
+		color.Dim("=>"),
+		color.Magenta("sema error"),
 	)
 
 	gutter := color.Dim("    |")
@@ -46,7 +47,6 @@ func (e *SemaError) String() string {
 		for _, it := range e.Src.Window(e.Line, 4, 4) {
 			if it.Line == e.Line {
 				fmt.Fprintf(&b, "\n%s %s", gutter, it.Text)
-
 				col := e.Col
 				if col < 1 {
 					col = 1
@@ -64,13 +64,13 @@ func (e *SemaError) String() string {
 	}
 
 	fmt.Fprintf(&b, "\n%s %s",
-		    color.Dim("=>"),
-		    color.Yellow("reason:")+" "+e.Msg,
+		color.Dim("=>"),
+		color.Yellow("reason:")+" "+e.Msg,
 	)
 	if e.Fix != "" {
 		fmt.Fprintf(&b, "\n%s %s",
-			    color.Dim("=>"),
-			    color.Yellow("fix:")+" "+e.Fix,
+			color.Dim("=>"),
+			color.Yellow("fix:")+" "+e.Fix,
 		)
 	}
 	return b.String()
@@ -89,6 +89,18 @@ func nodePos(n any) (int, int, bool) {
 		return 0, 0, false
 	}
 	return line, col, true
+}
+
+// nodeNames extracts the [][2]int positions appended by parser.withNames.
+func nodeNames(n any) [][2]int {
+	node, ok := n.([]any)
+	if !ok || len(node) < 3 {
+		return nil
+	}
+	if ns, ok := node[len(node)-3].([][2]int); ok {
+		return ns
+	}
+	return nil
 }
 
 // ---------- types ----------
@@ -117,36 +129,36 @@ func typeStr(t Type) string {
 		return "<nil>"
 	}
 	switch t[0].(string) {
-		case "int_const":
-			return fmt.Sprintf("int literal %d", t[1].(int))
-		case "any", "int", "float", "string", "bool", "byte", "nil", "void", "unknown", "error":
-			return t[0].(string)
-		case "list":
-			return "[]" + typeStr(t[1].(Type))
-		case "set":
-			return "{}" + typeStr(t[1].(Type))
-		case "map":
-			return "map[" + typeStr(t[1].(Type)) + "]" + typeStr(t[2].(Type))
-		case "ptr":
-			return "*" + typeStr(t[1].(Type))
-		case "tuple":
-			elems := t[1].([]Type)
-			var ss []string
-			for _, e := range elems {
-				ss = append(ss, typeStr(e))
-			}
-			return "(" + strings.Join(ss, ", ") + ")"
-		case "struct", "interface":
-			return t[1].(string)
-		case "package":
-			return "package " + t[1].(string)
-		case "fn":
-			params := t[1].([]Type)
-			var ps []string
-			for _, p := range params {
-				ps = append(ps, typeStr(p))
-			}
-			return fmt.Sprintf("fn(%s) -> %s", strings.Join(ps, ", "), typeStr(t[2].(Type)))
+	case "int_const":
+		return fmt.Sprintf("int literal %d", t[1].(int))
+	case "any", "int", "float", "string", "bool", "byte", "nil", "void", "unknown", "error":
+		return t[0].(string)
+	case "list":
+		return "[]" + typeStr(t[1].(Type))
+	case "set":
+		return "{}" + typeStr(t[1].(Type))
+	case "map":
+		return "map[" + typeStr(t[1].(Type)) + "]" + typeStr(t[2].(Type))
+	case "ptr":
+		return "*" + typeStr(t[1].(Type))
+	case "tuple":
+		elems := t[1].([]Type)
+		var ss []string
+		for _, e := range elems {
+			ss = append(ss, typeStr(e))
+		}
+		return "(" + strings.Join(ss, ", ") + ")"
+	case "struct", "interface":
+		return t[1].(string)
+	case "package":
+		return "package " + t[1].(string)
+	case "fn":
+		params := t[1].([]Type)
+		var ps []string
+		for _, p := range params {
+			ps = append(ps, typeStr(p))
+		}
+		return fmt.Sprintf("fn(%s) -> %s", strings.Join(ps, ", "), typeStr(t[2].(Type)))
 	}
 	return fmt.Sprintf("%v", t)
 }
@@ -284,12 +296,17 @@ type Symbol struct {
 }
 
 type Scope struct {
-	Symbols map[string]*Symbol
-	Parent  *Scope
+	Symbols  map[string]*Symbol
+	Parent   *Scope
+	Children []*Scope
 }
 
 func NewScope(parent *Scope) *Scope {
-	return &Scope{Symbols: map[string]*Symbol{}, Parent: parent}
+	s := &Scope{Symbols: map[string]*Symbol{}, Parent: parent}
+	if parent != nil {
+		parent.Children = append(parent.Children, s)
+	}
+	return s
 }
 
 func (s *Scope) Declare(sym *Symbol) *Symbol {
@@ -309,8 +326,6 @@ func (s *Scope) Lookup(name string) *Symbol {
 	return nil
 }
 
-// Names returns every symbol name visible from this scope, closest
-// first. Used for "did you mean" suggestions.
 func (s *Scope) Names() []string {
 	seen := map[string]bool{}
 	var out []string
@@ -359,6 +374,13 @@ type StructInfo struct {
 type InterfaceInfo struct {
 	Name    string
 	Methods map[string]*FnSig
+}
+
+// Member is a field, method, or package-level name reachable via `.`.
+type Member struct {
+	Name string
+	Kind string // "field" | "method" | "func" | "const"
+	Type Type
 }
 
 // ---------- builtins ----------
@@ -414,8 +436,6 @@ var BuiltinPackages = map[string]map[string]Type{
 	},
 }
 
-// BuiltinFuncs are always in scope. Unlike std/* packages, these do
-// not require an import.
 var BuiltinFuncs = map[string]Type{
 	"len":    Type{"fn", []Type{TAny}, TInt, false},
 	"append": Type{"fn", []Type{Type{"list", TAny}, TAny}, Type{"list", TAny}, false},
@@ -424,9 +444,6 @@ var BuiltinFuncs = map[string]Type{
 	"methodsOf": Type{"fn", []Type{TAny}, Type{"list", TString}, false},
 	"fieldsOf":  Type{"fn", []Type{TAny}, Type{"list", TString}, false},
 
-	// make is handled specially in inferCall; this entry only exists
-	// so the identifier resolves. Its real type comes from the
-	// type-name argument, not from this signature.
 	"make": Type{"fn", []Type{TString, TAny}, TAny, true},
 }
 
@@ -447,10 +464,9 @@ type Sema struct {
 
 	unknownReported bool
 
-	// Types maps a source node's (line, col) to the type sema inferred
-	// for it. The lowerer reads this table to attach type info to HIR
-	// nodes.
 	Types map[[2]int]Type
+
+	AllSymbols []*Symbol
 
 	Src *source.Source
 }
@@ -472,7 +488,30 @@ func New(src *source.Source) *Sema {
 	return s
 }
 
-// installPackages registers a `package` symbol for every std/* import.
+func (s *Sema) recordType(line, col int, ty Type) {
+	if ty == nil || isUnknown(ty) || line < 1 {
+		return
+	}
+	s.Types[[2]int{line, col}] = ty
+}
+
+func (s *Sema) recordNameTypes(names [][2]int, types []Type) {
+	if len(names) == 0 {
+		return
+	}
+	if len(types) == 1 && len(names) > 1 {
+		for _, p := range names {
+			s.recordType(p[0], p[1], types[0])
+		}
+		return
+	}
+	for i, p := range names {
+		if i < len(types) {
+			s.recordType(p[0], p[1], types[i])
+		}
+	}
+}
+
 func (s *Sema) installPackages(imports []string) {
 	for _, imp := range imports {
 		if !strings.HasPrefix(imp, "std/") {
@@ -537,17 +576,19 @@ func (s *Sema) reportUnused(scope *Scope) {
 			continue
 		}
 		switch sym.Kind {
-			case "const", "func", "package", "global":
-				continue
+		case "const", "func", "package", "global":
+			continue
 		}
 		if !sym.Used {
 			s.errAtCode(sym.Node, "S_UNUSED",
-				    fmt.Sprintf("%s declared and not used", sym.Name))
+				fmt.Sprintf("%s declared and not used", sym.Name))
 		}
 	}
 }
 
 func (s *Sema) Analyze(prog []any) []*SemaError {
+	s.AllSymbols = nil
+
 	decls := prog[3].([]any)
 	var imports []string
 	if len(prog) > 2 {
@@ -561,13 +602,12 @@ func (s *Sema) Analyze(prog []any) []*SemaError {
 	s.collectSignatures(decls)
 	s.checkGlobals(decls)
 	s.checkBodies(decls)
+	s.checkTopStmts(decls)
 	s.checkImports(imports)
+	s.collectAllSymbols()
 	return s.Errors
 }
 
-// TypeOf returns the type sema recorded for the given AST node, or nil
-// if the node has no recorded type. Used by the lowerer to attach type
-// info to HIR nodes.
 func (s *Sema) TypeOf(node any) Type {
 	if s == nil {
 		return nil
@@ -580,57 +620,192 @@ func (s *Sema) TypeOf(node any) Type {
 	return nil
 }
 
+func (s *Sema) TypeAt(line, col int) Type {
+	if s == nil {
+		return nil
+	}
+	return s.Types[[2]int{line, col}]
+}
+
+func TypeString(t Type) string { return typeStr(t) }
+
+// LookupAny finds a symbol by name in any scope in the tree (DFS).
+func (s *Sema) LookupAny(name string) *Symbol {
+	if s == nil {
+		return nil
+	}
+	var found *Symbol
+	var walk func(sc *Scope)
+	walk = func(sc *Scope) {
+		if found != nil {
+			return
+		}
+		if sym, ok := sc.Symbols[name]; ok {
+			found = sym
+			return
+		}
+		for _, child := range sc.Children {
+			walk(child)
+			if found != nil {
+				return
+			}
+		}
+	}
+	walk(s.Globals)
+	return found
+}
+
+// MembersOf returns fields + methods reachable via `.` on the given type.
+func (s *Sema) MembersOf(ty Type) []Member {
+	if s == nil || ty == nil {
+		return nil
+	}
+	if isKind(ty, "ptr") {
+		ty = ty[1].(Type)
+	}
+
+	switch {
+	case isKind(ty, "struct"):
+		name := ty[1].(string)
+		info := s.Structs[name]
+		if info == nil {
+			return nil
+		}
+		var out []Member
+		for fname, fty := range info.Fields {
+			out = append(out, Member{Name: fname, Kind: "field", Type: fty})
+		}
+		for mname, sig := range info.Methods {
+			out = append(out, Member{Name: mname, Kind: "method", Type: sig.Type()})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return out
+
+	case isKind(ty, "interface"):
+		name := ty[1].(string)
+		info := s.Interfaces[name]
+		if info == nil {
+			return nil
+		}
+		var out []Member
+		for mname, sig := range info.Methods {
+			out = append(out, Member{Name: mname, Kind: "method", Type: sig.Type()})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return out
+
+	case isKind(ty, "package"):
+		name := ty[1].(string)
+		members := BuiltinPackages[name]
+		var out []Member
+		for mname, mty := range members {
+			kind := "func"
+			if !isKind(mty, "fn") {
+				kind = "const"
+			}
+			out = append(out, Member{Name: mname, Kind: kind, Type: mty})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return out
+	}
+	return nil
+}
+
+func (s *Sema) collectAllSymbols() {
+	seen := map[string]bool{}
+
+	var walk func(sc *Scope)
+	walk = func(sc *Scope) {
+		for _, sym := range sc.Symbols {
+			if seen[sym.Name] {
+				continue
+			}
+			seen[sym.Name] = true
+			s.AllSymbols = append(s.AllSymbols, sym)
+		}
+		for _, child := range sc.Children {
+			walk(child)
+		}
+	}
+	walk(s.Globals)
+
+	for name := range s.Structs {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		s.AllSymbols = append(s.AllSymbols, &Symbol{
+			Name: name, Kind: "struct", Type: Type{"struct", name},
+		})
+	}
+	for name := range s.Interfaces {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		s.AllSymbols = append(s.AllSymbols, &Symbol{
+			Name: name, Kind: "interface", Type: Type{"interface", name},
+		})
+	}
+}
+
 // ---------- pass 1a: names ----------
 
 func (s *Sema) collectNames(decls []any) {
 	for _, d := range decls {
 		dd := d.([]any)
 		switch dd[0].(string) {
-			case "StructDecl":
-				name := dd[1].(string)
-				if _, ok := s.Structs[name]; ok {
-					s.errAt(d, fmt.Sprintf("type %q already declared", name))
-					continue
-				}
-				if _, ok := s.Interfaces[name]; ok {
-					s.errAt(d, fmt.Sprintf("type %q already declared", name))
-					continue
-				}
-				s.Structs[name] = &StructInfo{
-					Name:    name,
-					Fields:  map[string]Type{},
-					Methods: map[string]*FnSig{},
-				}
-			case "InterfaceDecl":
-				name := dd[1].(string)
-				if _, ok := s.Structs[name]; ok {
-					s.errAt(d, fmt.Sprintf("type %q already declared", name))
-					continue
-				}
-				if _, ok := s.Interfaces[name]; ok {
-					s.errAt(d, fmt.Sprintf("type %q already declared", name))
-					continue
-				}
-				s.Interfaces[name] = &InterfaceInfo{
-					Name:    name,
-					Methods: map[string]*FnSig{},
-				}
-			case "TopLet":
-				names := dd[1].([]string)
-				for _, name := range names {
-					if prev := s.Globals.Declare(&Symbol{
-						Name: name, Kind: "global", Node: d, Type: TUnknown,
-					}); prev != nil {
-						s.errAt(d, fmt.Sprintf("%q redeclared in this scope", name))
-					}
-				}
-			case "TopConst":
-				name := dd[1].(string)
+		case "StructDecl":
+			name := dd[1].(string)
+			if ns := nodeNames(d); len(ns) > 0 {
+				s.recordType(ns[0][0], ns[0][1], Type{"struct", name})
+			}
+			if _, ok := s.Structs[name]; ok {
+				s.errAt(d, fmt.Sprintf("type %q already declared", name))
+				continue
+			}
+			if _, ok := s.Interfaces[name]; ok {
+				s.errAt(d, fmt.Sprintf("type %q already declared", name))
+				continue
+			}
+			s.Structs[name] = &StructInfo{
+				Name:    name,
+				Fields:  map[string]Type{},
+				Methods: map[string]*FnSig{},
+			}
+		case "InterfaceDecl":
+			name := dd[1].(string)
+			if ns := nodeNames(d); len(ns) > 0 {
+				s.recordType(ns[0][0], ns[0][1], Type{"interface", name})
+			}
+			if _, ok := s.Structs[name]; ok {
+				s.errAt(d, fmt.Sprintf("type %q already declared", name))
+				continue
+			}
+			if _, ok := s.Interfaces[name]; ok {
+				s.errAt(d, fmt.Sprintf("type %q already declared", name))
+				continue
+			}
+			s.Interfaces[name] = &InterfaceInfo{
+				Name:    name,
+				Methods: map[string]*FnSig{},
+			}
+		case "TopLet":
+			names := dd[1].([]string)
+			for _, name := range names {
 				if prev := s.Globals.Declare(&Symbol{
-					Name: name, Kind: "global", Const: true, Node: d, Type: TUnknown,
+					Name: name, Kind: "global", Node: d, Type: TUnknown,
 				}); prev != nil {
 					s.errAt(d, fmt.Sprintf("%q redeclared in this scope", name))
 				}
+			}
+		case "TopConst":
+			name := dd[1].(string)
+			if prev := s.Globals.Declare(&Symbol{
+				Name: name, Kind: "global", Const: true, Node: d, Type: TUnknown,
+			}); prev != nil {
+				s.errAt(d, fmt.Sprintf("%q redeclared in this scope", name))
+			}
 		}
 	}
 }
@@ -641,10 +816,10 @@ func (s *Sema) resolveTypes(decls []any) {
 	for _, d := range decls {
 		dd := d.([]any)
 		switch dd[0].(string) {
-			case "StructDecl":
-				s.resolveStruct(dd)
-			case "InterfaceDecl":
-				s.resolveInterface(dd)
+		case "StructDecl":
+			s.resolveStruct(dd)
+		case "InterfaceDecl":
+			s.resolveInterface(dd)
 		}
 	}
 }
@@ -662,40 +837,40 @@ func (s *Sema) resolveTypeNodeAt(node any, at any) Type {
 		return TUnknown
 	}
 	switch n[0].(string) {
-		case "ListType":
-			return Type{"list", s.resolveTypeNodeAt(n[1], at)}
-		case "SetType":
-			return Type{"set", s.resolveTypeNodeAt(n[1], at)}
-		case "MapType":
-			return Type{"map",
-				s.resolveTypeNodeAt(n[1], at),
-				s.resolveTypeNodeAt(n[2], at)}
-		case "PtrType":
-			return Type{"ptr", s.resolveTypeNodeAt(n[1], at)}
-		case "TupleType":
-			elems := n[1].([]any)
-			var ts []Type
-			for _, e := range elems {
-				ts = append(ts, s.resolveTypeNodeAt(e, at))
-			}
-			return Type{"tuple", ts}
+	case "ListType":
+		return Type{"list", s.resolveTypeNodeAt(n[1], at)}
+	case "SetType":
+		return Type{"set", s.resolveTypeNodeAt(n[1], at)}
+	case "MapType":
+		return Type{"map",
+			s.resolveTypeNodeAt(n[1], at),
+			s.resolveTypeNodeAt(n[2], at)}
+	case "PtrType":
+		return Type{"ptr", s.resolveTypeNodeAt(n[1], at)}
+	case "TupleType":
+		elems := n[1].([]any)
+		var ts []Type
+		for _, e := range elems {
+			ts = append(ts, s.resolveTypeNodeAt(e, at))
+		}
+		return Type{"tuple", ts}
 	}
 	name := n[1].(string)
 	switch name {
-		case "int":
-			return TInt
-		case "float":
-			return TFloat
-		case "string":
-			return TString
-		case "byte":
-			return TByte
-		case "bool":
-			return TBool
-		case "error":
-			return TError
-		case "any":
-			return TAny
+	case "int":
+		return TInt
+	case "float":
+		return TFloat
+	case "string":
+		return TString
+	case "byte":
+		return TByte
+	case "bool":
+		return TBool
+	case "error":
+		return TError
+	case "any":
+		return TAny
 	}
 	if _, ok := s.Structs[name]; ok {
 		return Type{"struct", name}
@@ -779,106 +954,115 @@ func (s *Sema) collectSignatures(decls []any) {
 	for _, d := range decls {
 		dd := d.([]any)
 		switch dd[0].(string) {
-			case "FnDecl":
-				name := dd[1].(string)
-				params := dd[2].([]any)
-				retNode := dd[3]
-				errNode := dd[4]
+		case "FnDecl":
+			name := dd[1].(string)
+			params := dd[2].([]any)
+			retNode := dd[3]
+			errNode := dd[4]
 
-				if _, ok := s.Funcs[name]; ok {
-					s.errAt(d, fmt.Sprintf("function %q already declared", name))
+			if _, ok := s.Funcs[name]; ok {
+				s.errAt(d, fmt.Sprintf("function %q already declared", name))
+				continue
+			}
+			var ps []Param
+			variadic := false
+			seen := map[string]bool{}
+			for _, p := range params {
+				pp := p.([]any)
+				pname := pp[1].(string)
+				if seen[pname] {
+					s.errAt(p, fmt.Sprintf("parameter %q redeclared", pname))
 					continue
 				}
-				var ps []Param
-				variadic := false
-				seen := map[string]bool{}
-				for _, p := range params {
-					pp := p.([]any)
-					pname := pp[1].(string)
-					if seen[pname] {
-						s.errAt(p, fmt.Sprintf("parameter %q redeclared", pname))
-						continue
-					}
-					seen[pname] = true
-					ps = append(ps, Param{
-						Name: pname,
-						Type: s.resolveTypeNodeAt(pp[2], p),
-					})
-					if v, ok := pp[3].(bool); ok && v {
-						variadic = true
-					}
+				seen[pname] = true
+				ps = append(ps, Param{
+					Name: pname,
+					Type: s.resolveTypeNodeAt(pp[2], p),
+				})
+				if v, ok := pp[3].(bool); ok && v {
+					variadic = true
 				}
-				rt := TVoid
-				if retNode != nil {
-					rt = s.resolveTypeNodeAt(retNode, d)
-				}
-				var et Type
-				if errNode != nil {
-					et = s.resolveTypeNodeAt(errNode, d)
-				}
-				sig := &FnSig{Name: name, Params: ps, Ret: rt, ErrType: et, Variadic: variadic}
-				s.Funcs[name] = sig
-				if prev := s.Globals.Declare(&Symbol{
-					Name: name, Kind: "func", Type: sig.Type(),
-				}); prev != nil {
-					s.errAt(d, fmt.Sprintf("%q redeclared in this scope", name))
-				}
+			}
+			rt := TVoid
+			if retNode != nil {
+				rt = s.resolveTypeNodeAt(retNode, d)
+			}
+			var et Type
+			if errNode != nil {
+				et = s.resolveTypeNodeAt(errNode, d)
+			}
+			sig := &FnSig{Name: name, Params: ps, Ret: rt, ErrType: et, Variadic: variadic}
+			s.Funcs[name] = sig
 
-			case "MethodDecl":
-				recv := dd[1].(string)
-				name := dd[2].(string)
-				params := dd[3].([]any)
-				retNode := dd[4]
-				errNode := dd[5]
+			if ns := nodeNames(d); len(ns) > 0 {
+				s.recordType(ns[0][0], ns[0][1], sig.Type())
+			}
 
-				if _, ok := s.Structs[recv]; !ok {
-					if _, ok := s.Interfaces[recv]; !ok {
-						s.errAt(d, fmt.Sprintf("receiver type %q not declared", recv))
-						continue
-					}
-				}
-				var ps []Param
-				variadic := false
-				seen := map[string]bool{}
-				for _, p := range params {
-					pp := p.([]any)
-					pname := pp[1].(string)
-					if seen[pname] {
-						s.errAt(p, fmt.Sprintf("parameter %q redeclared", pname))
-						continue
-					}
-					seen[pname] = true
-					ps = append(ps, Param{
-						Name: pname,
-						Type: s.resolveTypeNodeAt(pp[2], p),
-					})
-					if v, ok := pp[3].(bool); ok && v {
-						variadic = true
-					}
-				}
-				rt := TVoid
-				if retNode != nil {
-					rt = s.resolveTypeNodeAt(retNode, d)
-				}
-				var et Type
-				if errNode != nil {
-					et = s.resolveTypeNodeAt(errNode, d)
-				}
-				sig := &FnSig{
-					Name: name, Params: ps, Ret: rt, ErrType: et,
-					Variadic: variadic, Recv: recv,
-				}
-				key := recv + "." + name
-				if _, ok := s.Methods[key]; ok {
-					s.errAt(d, fmt.Sprintf("method %s.%s already declared", recv, name))
+			if prev := s.Globals.Declare(&Symbol{
+				Name: name, Kind: "func", Type: sig.Type(),
+			}); prev != nil {
+				s.errAt(d, fmt.Sprintf("%q redeclared in this scope", name))
+			}
+
+		case "MethodDecl":
+			recv := dd[1].(string)
+			name := dd[2].(string)
+			params := dd[3].([]any)
+			retNode := dd[4]
+			errNode := dd[5]
+
+			if _, ok := s.Structs[recv]; !ok {
+				if _, ok := s.Interfaces[recv]; !ok {
+					s.errAt(d, fmt.Sprintf("receiver type %q not declared", recv))
 					continue
 				}
-				s.Methods[key] = sig
-				if info, ok := s.Structs[recv]; ok {
-					info.Methods[name] = sig
-				} else {
-					s.Interfaces[recv].Methods[name] = sig
+			}
+			var ps []Param
+			variadic := false
+			seen := map[string]bool{}
+			for _, p := range params {
+				pp := p.([]any)
+				pname := pp[1].(string)
+				if seen[pname] {
+					s.errAt(p, fmt.Sprintf("parameter %q redeclared", pname))
+					continue
 				}
+				seen[pname] = true
+				ps = append(ps, Param{
+					Name: pname,
+					Type: s.resolveTypeNodeAt(pp[2], p),
+				})
+				if v, ok := pp[3].(bool); ok && v {
+					variadic = true
+				}
+			}
+			rt := TVoid
+			if retNode != nil {
+				rt = s.resolveTypeNodeAt(retNode, d)
+			}
+			var et Type
+			if errNode != nil {
+				et = s.resolveTypeNodeAt(errNode, d)
+			}
+			sig := &FnSig{
+				Name: name, Params: ps, Ret: rt, ErrType: et,
+				Variadic: variadic, Recv: recv,
+			}
+			key := recv + "." + name
+			if _, ok := s.Methods[key]; ok {
+				s.errAt(d, fmt.Sprintf("method %s.%s already declared", recv, name))
+				continue
+			}
+			s.Methods[key] = sig
+			if info, ok := s.Structs[recv]; ok {
+				info.Methods[name] = sig
+			} else {
+				s.Interfaces[recv].Methods[name] = sig
+			}
+
+			if ns := nodeNames(d); len(ns) > 0 {
+				s.recordType(ns[0][0], ns[0][1], sig.Type())
+			}
 		}
 	}
 }
@@ -889,43 +1073,50 @@ func (s *Sema) checkGlobals(decls []any) {
 	for _, d := range decls {
 		dd := d.([]any)
 		switch dd[0].(string) {
-			case "TopLet":
-				names := dd[1].([]string)
-				tyNode := dd[2]
-				expr := dd[3]
+		case "TopLet":
+			names := dd[1].([]string)
+			tyNode := dd[2]
+			expr := dd[3]
 
-				var declared Type
-				if tyNode != nil {
-					declared = s.resolveTypeNodeAt(tyNode, d)
+			var declared Type
+			if tyNode != nil {
+				declared = s.resolveTypeNodeAt(tyNode, d)
+			}
+			var inferred Type
+			if expr != nil {
+				inferred = s.infer(expr, s.Globals)
+			}
+			ty := declared
+			if ty == nil {
+				ty = defaultType(inferred)
+			}
+			if declared != nil && inferred != nil &&
+				!typesEqual(inferred, declared) {
+				s.errAt(d, fmt.Sprintf("cannot assign %s to %s",
+					typeStr(inferred), typeStr(declared)))
+			}
+			if ty == nil {
+				s.errAt(d, "global let needs a type or initializer")
+				ty = TUnknown
+			}
+			for _, n := range names {
+				if sym := s.Globals.Lookup(n); sym != nil {
+					sym.Type = ty
 				}
-				var inferred Type
-				if expr != nil {
-					inferred = s.infer(expr, s.Globals)
-				}
-				ty := declared
-				if ty == nil {
-					ty = defaultType(inferred)
-				}
-				if declared != nil && inferred != nil &&
-					!typesEqual(inferred, declared) {
-					s.errAt(d, fmt.Sprintf("cannot assign %s to %s",
-						typeStr(inferred), typeStr(declared)))
-				}
-				if ty == nil {
-					s.errAt(d, "global let needs a type or initializer")
-					ty = TUnknown
-				}
-				for _, n := range names {
-					if sym := s.Globals.Lookup(n); sym != nil {
-						sym.Type = ty
-					}
-				}
-			case "TopConst":
-				name := dd[1].(string)
-				expr := dd[2]
-				if sym := s.Globals.Lookup(name); sym != nil {
-					sym.Type = defaultType(s.infer(expr, s.Globals))
-				}
+			}
+			if ns := nodeNames(d); len(ns) > 0 {
+				s.recordNameTypes(ns, []Type{ty})
+			}
+		case "TopConst":
+			name := dd[1].(string)
+			expr := dd[2]
+			ty := defaultType(s.infer(expr, s.Globals))
+			if sym := s.Globals.Lookup(name); sym != nil {
+				sym.Type = ty
+			}
+			if ns := nodeNames(d); len(ns) > 0 {
+				s.recordNameTypes(ns, []Type{ty})
+			}
 		}
 	}
 }
@@ -968,80 +1159,111 @@ func (s *Sema) checkBodies(decls []any) {
 	for _, d := range decls {
 		dd := d.([]any)
 		switch dd[0].(string) {
-			case "FnDecl":
-				name := dd[1].(string)
-				params := dd[2].([]any)
-				body := dd[5]
-				sig, ok := s.Funcs[name]
-				if !ok {
-					continue
-				}
-				s.CurrentRet = sig.Ret
-				s.CurrentErr = sig.ErrType
-				s.loopDepth = 0
+		case "FnDecl":
+			name := dd[1].(string)
+			params := dd[2].([]any)
+			body := dd[5]
+			sig, ok := s.Funcs[name]
+			if !ok {
+				continue
+			}
+			s.CurrentRet = sig.Ret
+			s.CurrentErr = sig.ErrType
+			s.loopDepth = 0
 
-				scope := NewScope(s.Globals)
-				for _, p := range params {
-					pp := p.([]any)
-					pname := pp[1].(string)
-					pty := s.resolveTypeNodeAt(pp[2], p)
-					if v, ok := pp[3].(bool); ok && v {
-						pty = Type{"list", pty}
-					}
-					if prev := scope.Declare(&Symbol{
-						Name: pname, Kind: "var", Param: true,
-						Node: p, Type: pty,
-					}); prev != nil {
-						s.errAt(p, fmt.Sprintf("%q redeclared in this scope", pname))
-					}
-				}
-				s.checkBlock(body, scope)
-				s.CurrentRet = nil
-				s.CurrentErr = nil
-
-			case "MethodDecl":
-				recv := dd[1].(string)
-				name := dd[2].(string)
-				params := dd[3].([]any)
-				body := dd[6]
-				sig, ok := s.Methods[recv+"."+name]
-				if !ok {
-					continue
-				}
-				s.CurrentRet = sig.Ret
-				s.CurrentErr = sig.ErrType
-				s.loopDepth = 0
-
-				scope := NewScope(s.Globals)
-				var recvType Type
-				if _, ok := s.Structs[recv]; ok {
-					recvType = Type{"struct", recv}
-				} else {
-					recvType = Type{"interface", recv}
+			scope := NewScope(s.Globals)
+			for _, p := range params {
+				pp := p.([]any)
+				pname := pp[1].(string)
+				pty := s.resolveTypeNodeAt(pp[2], p)
+				if v, ok := pp[3].(bool); ok && v {
+					pty = Type{"list", pty}
 				}
 				if prev := scope.Declare(&Symbol{
-					Name: "self", Kind: "var", Param: true,
-					Node: d, Type: recvType,
+					Name: pname, Kind: "var", Param: true,
+					Node: p, Type: pty,
 				}); prev != nil {
-					s.errAt(d, `"self" redeclared in this scope`)
+					s.errAt(p, fmt.Sprintf("%q redeclared in this scope", pname))
 				}
-				for _, p := range params {
-					pp := p.([]any)
-					pname := pp[1].(string)
-					pty := s.resolveTypeNodeAt(pp[2], p)
-					if v, ok := pp[3].(bool); ok && v {
-						pty = Type{"list", pty}
-					}
-					if prev := scope.Declare(&Symbol{
-						Name: pname, Kind: "var", Param: true,
-						Node: p, Type: pty,
-					}); prev != nil {
-						s.errAt(p, fmt.Sprintf("%q redeclared in this scope", pname))
-					}
+				if pn, ok := pp[4].([][2]int); ok && len(pn) > 0 {
+					s.recordType(pn[0][0], pn[0][1], pty)
 				}
-				s.checkBlock(body, scope)
-				s.CurrentRet = nil
-				s.CurrentErr = nil
+			}
+			s.checkBlock(body, scope)
+			s.CurrentRet = nil
+			s.CurrentErr = nil
+
+		case "MethodDecl":
+			recv := dd[1].(string)
+			name := dd[2].(string)
+			params := dd[3].([]any)
+			body := dd[6]
+			sig, ok := s.Methods[recv+"."+name]
+			if !ok {
+				continue
+			}
+			s.CurrentRet = sig.Ret
+			s.CurrentErr = sig.ErrType
+			s.loopDepth = 0
+
+			scope := NewScope(s.Globals)
+
+			// self là *struct cho struct, interface giữ nguyên
+			var recvType Type
+			if _, ok := s.Structs[recv]; ok {
+				recvType = Type{"ptr", Type{"struct", recv}}
+			} else {
+				recvType = Type{"interface", recv}
+			}
+			if prev := scope.Declare(&Symbol{
+				Name: "self", Kind: "var", Param: true,
+				Node: d, Type: recvType,
+			}); prev != nil {
+				s.errAt(d, `"self" redeclared in this scope`)
+			}
+			// hover cho self — names[1] là vị trí receiver name (self)
+			if ns := nodeNames(d); len(ns) > 1 {
+				s.recordType(ns[1][0], ns[1][1], recvType)
+			}
+
+			for _, p := range params {
+				pp := p.([]any)
+				pname := pp[1].(string)
+				pty := s.resolveTypeNodeAt(pp[2], p)
+				if v, ok := pp[3].(bool); ok && v {
+					pty = Type{"list", pty}
+				}
+				if prev := scope.Declare(&Symbol{
+					Name: pname, Kind: "var", Param: true,
+					Node: p, Type: pty,
+				}); prev != nil {
+					s.errAt(p, fmt.Sprintf("%q redeclared in this scope", pname))
+				}
+				if pn, ok := pp[4].([][2]int); ok && len(pn) > 0 {
+					s.recordType(pn[0][0], pn[0][1], pty)
+				}
+			}
+			s.checkBlock(body, scope)
+			s.CurrentRet = nil
+			s.CurrentErr = nil
+		}
+	}
+}
+
+func (s *Sema) checkTopStmts(decls []any) {
+	for _, d := range decls {
+		dd, ok := d.([]any)
+		if !ok || len(dd) == 0 {
+			continue
+		}
+		if dd[0].(string) != "TopStmt" {
+			continue
+		}
+		s.CurrentRet = nil
+		s.CurrentErr = nil
+		s.loopDepth = 0
+		for _, st := range dd[1].([]any) {
+			s.checkStmt(st, s.Globals)
 		}
 	}
 }
@@ -1067,105 +1289,109 @@ func (s *Sema) checkStmt(stmt any, scope *Scope) {
 		return
 	}
 	switch st[0].(string) {
-		case "LetStmt":
-			s.checkLet(stmt, st, scope)
+	case "LetStmt":
+		s.checkLet(stmt, st, scope)
 
-		case "ConstStmt":
-			name := st[1].(string)
-			expr := st[2]
-			ty := defaultType(s.infer(expr, scope))
-			if prev := scope.Declare(&Symbol{
-				Name: name, Kind: "const", Type: ty, Const: true, Node: stmt,
-			}); prev != nil {
-				s.errAt(stmt, fmt.Sprintf("%q redeclared in this scope", name))
-			}
+	case "ConstStmt":
+		name := st[1].(string)
+		expr := st[2]
+		ty := defaultType(s.infer(expr, scope))
+		if prev := scope.Declare(&Symbol{
+			Name: name, Kind: "const", Type: ty, Const: true, Node: stmt,
+		}); prev != nil {
+			s.errAt(stmt, fmt.Sprintf("%q redeclared in this scope", name))
+		}
+		if ns := nodeNames(stmt); len(ns) > 0 {
+			s.recordNameTypes(ns, []Type{ty})
+		}
 
-		case "AssignStmt":
-			tgt := st[1]
-			expr := st[2]
-			et := s.infer(expr, scope)
-			tt := s.checkLValue(tgt, scope)
-			if !s.assignable(et, tt) {
-				s.errAt(stmt, s.assignErr(et, tt))
-			}
+	case "AssignStmt":
+		tgt := st[1]
+		expr := st[2]
+		s.infer(tgt, scope) // track LHS cho hover
+		et := s.infer(expr, scope)
+		tt := s.checkLValue(tgt, scope)
+		if !s.assignable(et, tt) {
+			s.errAt(stmt, s.assignErr(et, tt))
+		}
 
-		case "IncDecStmt":
-			name := st[1].(string)
-			sym := scope.Lookup(name)
-			if sym == nil {
-				s.errAt(stmt, fmt.Sprintf("undefined: %s", name))
-			} else if sym.Const {
-				s.errAt(stmt, fmt.Sprintf("cannot modify const %q", name))
-			} else if !isUnknown(sym.Type) && !isNumeric(sym.Type) {
-				s.errAt(stmt, fmt.Sprintf("cannot increment %s", typeStr(sym.Type)))
+	case "IncDecStmt":
+		name := st[1].(string)
+		sym := scope.Lookup(name)
+		if sym == nil {
+			s.errAt(stmt, fmt.Sprintf("undefined: %s", name))
+		} else if sym.Const {
+			s.errAt(stmt, fmt.Sprintf("cannot modify const %q", name))
+		} else if !isUnknown(sym.Type) && !isNumeric(sym.Type) {
+			s.errAt(stmt, fmt.Sprintf("cannot increment %s", typeStr(sym.Type)))
+		} else {
+			sym.Used = true
+		}
+
+	case "ExprStmt":
+		s.infer(st[1], scope)
+
+	case "ReturnStmt":
+		s.checkReturn(stmt, scope)
+
+	case "BreakStmt":
+		if s.loopDepth == 0 {
+			s.errAt(stmt, "break outside loop")
+		}
+
+	case "ContinueStmt":
+		if s.loopDepth == 0 {
+			s.errAt(stmt, "continue outside loop")
+		}
+
+	case "IfStmt":
+		cond := st[1]
+		thenBlock := st[2]
+		els := st[3]
+		ct := s.infer(cond, scope)
+		if !typesEqual(ct, TBool) {
+			s.errAt(stmt, fmt.Sprintf("if condition must be bool, got %s", typeStr(ct)))
+		}
+		s.checkBlock(thenBlock, NewScope(scope))
+		if els != nil {
+			en, ok := els.([]any)
+			if ok && len(en) > 0 && en[0].(string) == "IfStmt" {
+				s.checkStmt(els, scope)
 			} else {
-				sym.Used = true
+				s.checkBlock(els, NewScope(scope))
 			}
+		}
 
-		case "ExprStmt":
-			s.infer(st[1], scope)
+	case "ForCStmt":
+		s.checkForC(stmt, st, scope)
 
-		case "ReturnStmt":
-			s.checkReturn(stmt, scope)
+	case "ForCondStmt":
+		cond := st[1]
+		body := st[2]
+		ct := s.infer(cond, scope)
+		if !typesEqual(ct, TBool) {
+			s.errAt(stmt, fmt.Sprintf("for condition must be bool, got %s", typeStr(ct)))
+		}
+		s.loopDepth++
+		s.checkBlock(body, NewScope(scope))
+		s.loopDepth--
 
-		case "BreakStmt":
-			if s.loopDepth == 0 {
-				s.errAt(stmt, "break outside loop")
-			}
+	case "ForRangeStmt":
+		count := st[1]
+		body := st[2]
+		ct := s.infer(count, scope)
+		if !typesEqual(ct, TInt) {
+			s.errAt(stmt, fmt.Sprintf("range count must be int, got %s", typeStr(ct)))
+		}
+		s.loopDepth++
+		s.checkBlock(body, NewScope(scope))
+		s.loopDepth--
 
-		case "ContinueStmt":
-			if s.loopDepth == 0 {
-				s.errAt(stmt, "continue outside loop")
-			}
+	case "ForIterStmt":
+		s.checkForIter(stmt, st, scope)
 
-		case "IfStmt":
-			cond := st[1]
-			thenBlock := st[2]
-			els := st[3]
-			ct := s.infer(cond, scope)
-			if !typesEqual(ct, TBool) {
-				s.errAt(stmt, fmt.Sprintf("if condition must be bool, got %s", typeStr(ct)))
-			}
-			s.checkBlock(thenBlock, NewScope(scope))
-			if els != nil {
-				en, ok := els.([]any)
-				if ok && len(en) > 0 && en[0].(string) == "IfStmt" {
-					s.checkStmt(els, scope)
-				} else {
-					s.checkBlock(els, NewScope(scope))
-				}
-			}
-
-		case "ForCStmt":
-			s.checkForC(stmt, st, scope)
-
-		case "ForCondStmt":
-			cond := st[1]
-			body := st[2]
-			ct := s.infer(cond, scope)
-			if !typesEqual(ct, TBool) {
-				s.errAt(stmt, fmt.Sprintf("for condition must be bool, got %s", typeStr(ct)))
-			}
-			s.loopDepth++
-			s.checkBlock(body, NewScope(scope))
-			s.loopDepth--
-
-		case "ForRangeStmt":
-			count := st[1]
-			body := st[2]
-			ct := s.infer(count, scope)
-			if !typesEqual(ct, TInt) {
-				s.errAt(stmt, fmt.Sprintf("range count must be int, got %s", typeStr(ct)))
-			}
-			s.loopDepth++
-			s.checkBlock(body, NewScope(scope))
-			s.loopDepth--
-
-		case "ForIterStmt":
-			s.checkForIter(stmt, st, scope)
-
-		default:
-			s.errAt(stmt, fmt.Sprintf("unknown statement kind %q", st[0].(string)))
+	default:
+		s.errAt(stmt, fmt.Sprintf("unknown statement kind %q", st[0].(string)))
 	}
 }
 
@@ -1183,7 +1409,7 @@ func (s *Sema) checkLet(stmt any, st []any, scope *Scope) {
 			s.errAt(stmt, "let-else requires an initializer")
 		} else if !s.isFallibleCall(expr, scope) {
 			s.errAtCode(stmt, "S_ERR_LET_RHS",
-				    "let-else RHS must be a call to a function marked `! error`")
+				"let-else RHS must be a call to a function marked `! error`")
 		}
 		elsScope := NewScope(scope)
 		elsScope.Declare(&Symbol{
@@ -1288,6 +1514,10 @@ func (s *Sema) checkLet(stmt any, st []any, scope *Scope) {
 			s.errAt(stmt, fmt.Sprintf("%q redeclared in this scope", n))
 		}
 	}
+
+	if ns := nodeNames(stmt); len(ns) > 0 {
+		s.recordNameTypes(ns, varTypes)
+	}
 }
 
 func (s *Sema) checkForC(stmt any, st []any, scope *Scope) {
@@ -1329,22 +1559,22 @@ func (s *Sema) checkForIter(stmt any, st []any, scope *Scope) {
 	} else {
 		st_ := s.infer(src, scope)
 		switch {
-			case isUnknown(st_):
-				s.noteUnknown(stmt, "cannot infer element type of `iter` source")
-				elemT = TUnknown
-			case isKind(st_, "list"):
-				elemT = st_[1].(Type)
-			case isKind(st_, "set"):
-				elemT = st_[1].(Type)
-			case isKind(st_, "map"):
-				s.errAt(stmt, "cannot iterate over a map yet")
-				elemT = st_[2].(Type)
-				idxT = st_[1].(Type)
-			case typesEqual(st_, TString):
-				elemT = TByte
-			default:
-				s.errAt(stmt, fmt.Sprintf("cannot iterate over %s", typeStr(st_)))
-				elemT = TUnknown
+		case isUnknown(st_):
+			s.noteUnknown(stmt, "cannot infer element type of `iter` source")
+			elemT = TUnknown
+		case isKind(st_, "list"):
+			elemT = st_[1].(Type)
+		case isKind(st_, "set"):
+			elemT = st_[1].(Type)
+		case isKind(st_, "map"):
+			s.errAt(stmt, "cannot iterate over a map yet")
+			elemT = st_[2].(Type)
+			idxT = st_[1].(Type)
+		case typesEqual(st_, TString):
+			elemT = TByte
+		default:
+			s.errAt(stmt, fmt.Sprintf("cannot iterate over %s", typeStr(st_)))
+			elemT = TUnknown
 		}
 	}
 
@@ -1377,10 +1607,10 @@ func (s *Sema) checkForPost(post any, scope *Scope) {
 	}
 	k := n[0].(string)
 	switch k {
-		case "IncDecStmt", "AssignStmt", "ExprStmt":
-			s.checkStmt(post, scope)
-		default:
-			s.infer(post, scope)
+	case "IncDecStmt", "AssignStmt", "ExprStmt":
+		s.checkStmt(post, scope)
+	default:
+		s.infer(post, scope)
 	}
 }
 
@@ -1479,49 +1709,49 @@ func (s *Sema) isFallibleCall(e any, scope *Scope) bool {
 		return false
 	}
 	switch callee[0].(string) {
-		case "IdentExpr":
-			name := callee[1].(string)
-			if sig, ok := s.Funcs[name]; ok {
-				return sig.Fallible()
-			}
+	case "IdentExpr":
+		name := callee[1].(string)
+		if sig, ok := s.Funcs[name]; ok {
+			return sig.Fallible()
+		}
+		return false
+	case "SelectorExpr":
+		recvExpr, ok := callee[1].([]any)
+		if !ok || len(recvExpr) == 0 {
 			return false
-		case "SelectorExpr":
-			recvExpr, ok := callee[1].([]any)
-			if !ok || len(recvExpr) == 0 {
-				return false
-			}
-			mname := callee[2].(string)
-			if recvExpr[0].(string) == "IdentExpr" {
-				rname := recvExpr[1].(string)
-				if info, ok := s.Structs[rname]; ok {
-					if sig, ok := info.Methods[mname]; ok {
-						return sig.Fallible()
-					}
-				}
-				if info, ok := s.Interfaces[rname]; ok {
-					if sig, ok := info.Methods[mname]; ok {
-						return sig.Fallible()
-					}
+		}
+		mname := callee[2].(string)
+		if recvExpr[0].(string) == "IdentExpr" {
+			rname := recvExpr[1].(string)
+			if info, ok := s.Structs[rname]; ok {
+				if sig, ok := info.Methods[mname]; ok {
+					return sig.Fallible()
 				}
 			}
-			rt := s.infer(recvExpr, scope)
-			if isKind(rt, "ptr") {
-				rt = rt[1].(Type)
-			}
-			if isKind(rt, "struct") {
-				if info, ok := s.Structs[rt[1].(string)]; ok {
-					if sig, ok := info.Methods[mname]; ok {
-						return sig.Fallible()
-					}
+			if info, ok := s.Interfaces[rname]; ok {
+				if sig, ok := info.Methods[mname]; ok {
+					return sig.Fallible()
 				}
 			}
-			if isKind(rt, "interface") {
-				if info, ok := s.Interfaces[rt[1].(string)]; ok {
-					if sig, ok := info.Methods[mname]; ok {
-						return sig.Fallible()
-					}
+		}
+		rt := s.infer(recvExpr, scope)
+		if isKind(rt, "ptr") {
+			rt = rt[1].(Type)
+		}
+		if isKind(rt, "struct") {
+			if info, ok := s.Structs[rt[1].(string)]; ok {
+				if sig, ok := info.Methods[mname]; ok {
+					return sig.Fallible()
 				}
 			}
+		}
+		if isKind(rt, "interface") {
+			if info, ok := s.Interfaces[rt[1].(string)]; ok {
+				if sig, ok := info.Methods[mname]; ok {
+					return sig.Fallible()
+				}
+			}
+		}
 	}
 	return false
 }
@@ -1535,77 +1765,77 @@ func (s *Sema) checkLValue(tgt any, scope *Scope) Type {
 		return TUnknown
 	}
 	switch t[0].(string) {
-		case "IdentExpr":
-			name := t[1].(string)
-			sym := scope.Lookup(name)
-			if sym == nil {
-				s.errAt(tgt, fmt.Sprintf("undefined: %s", name))
-				return TUnknown
-			}
-			if sym.Const {
-				s.errAt(tgt, fmt.Sprintf("cannot assign to const %q", name))
-				return TUnknown
-			}
-			return sym.Type
-
-		case "SelectorExpr":
-			bt := s.infer(t[1], scope)
-			if isKind(bt, "ptr") {
-				bt = bt[1].(Type)
-			}
-			if isKind(bt, "struct") {
-				sname := bt[1].(string)
-				info := s.Structs[sname]
-				fname := t[2].(string)
-				if info != nil {
-					if ft, ok := info.Fields[fname]; ok {
-						return ft
-					}
-					cands := make([]string, 0, len(info.Fields)+len(info.Methods))
-					for f := range info.Fields {
-						cands = append(cands, f)
-					}
-					for m := range info.Methods {
-						cands = append(cands, m)
-					}
-					if sug := suggest(fname, cands); sug != "" {
-						s.errAtCodeFix(tgt, "S_NO_MEMBER",
-							fmt.Sprintf("%s has no field %q", sname, fname),
-							fmt.Sprintf("Did you mean %q?", sug))
-						s.unknownReported = true
-						return TUnknown
-					}
-				}
-				s.errAt(tgt, fmt.Sprintf("%s has no field %q", sname, fname))
-				return TUnknown
-			}
-			s.errAt(tgt, fmt.Sprintf("cannot assign to %q on %s",
-				t[2].(string), typeStr(bt)))
+	case "IdentExpr":
+		name := t[1].(string)
+		sym := scope.Lookup(name)
+		if sym == nil {
+			s.errAt(tgt, fmt.Sprintf("undefined: %s", name))
 			return TUnknown
-
-		case "IndexExpr":
-			bt := s.infer(t[1], scope)
-			if isKind(bt, "ptr") {
-				bt = bt[1].(Type)
-			}
-			if isKind(bt, "list") {
-				it := s.infer(t[2], scope)
-				if !isUnknown(it) && !typesEqual(it, TInt) {
-					s.errAt(tgt, fmt.Sprintf("list index must be int, got %s", typeStr(it)))
-				}
-				return bt[1].(Type)
-			}
-			if isKind(bt, "map") {
-				kt := bt[1].(Type)
-				it := s.infer(t[2], scope)
-				if !typesEqual(it, kt) {
-					s.errAt(tgt, fmt.Sprintf("map key: expected %s, got %s",
-						typeStr(kt), typeStr(it)))
-				}
-				return bt[2].(Type)
-			}
-			s.errAt(tgt, fmt.Sprintf("cannot assign through index of %s", typeStr(bt)))
+		}
+		if sym.Const {
+			s.errAt(tgt, fmt.Sprintf("cannot assign to const %q", name))
 			return TUnknown
+		}
+		return sym.Type
+
+	case "SelectorExpr":
+		bt := s.infer(t[1], scope)
+		if isKind(bt, "ptr") {
+			bt = bt[1].(Type)
+		}
+		if isKind(bt, "struct") {
+			sname := bt[1].(string)
+			info := s.Structs[sname]
+			fname := t[2].(string)
+			if info != nil {
+				if ft, ok := info.Fields[fname]; ok {
+					return ft
+				}
+				cands := make([]string, 0, len(info.Fields)+len(info.Methods))
+				for f := range info.Fields {
+					cands = append(cands, f)
+				}
+				for m := range info.Methods {
+					cands = append(cands, m)
+				}
+				if sug := suggest(fname, cands); sug != "" {
+					s.errAtCodeFix(tgt, "S_NO_MEMBER",
+						fmt.Sprintf("%s has no field %q", sname, fname),
+						fmt.Sprintf("Did you mean %q?", sug))
+					s.unknownReported = true
+					return TUnknown
+				}
+			}
+			s.errAt(tgt, fmt.Sprintf("%s has no field %q", sname, fname))
+			return TUnknown
+		}
+		s.errAt(tgt, fmt.Sprintf("cannot assign to %q on %s",
+			t[2].(string), typeStr(bt)))
+		return TUnknown
+
+	case "IndexExpr":
+		bt := s.infer(t[1], scope)
+		if isKind(bt, "ptr") {
+			bt = bt[1].(Type)
+		}
+		if isKind(bt, "list") {
+			it := s.infer(t[2], scope)
+			if !isUnknown(it) && !typesEqual(it, TInt) {
+				s.errAt(tgt, fmt.Sprintf("list index must be int, got %s", typeStr(it)))
+			}
+			return bt[1].(Type)
+		}
+		if isKind(bt, "map") {
+			kt := bt[1].(Type)
+			it := s.infer(t[2], scope)
+			if !typesEqual(it, kt) {
+				s.errAt(tgt, fmt.Sprintf("map key: expected %s, got %s",
+					typeStr(kt), typeStr(it)))
+			}
+			return bt[2].(Type)
+		}
+		s.errAt(tgt, fmt.Sprintf("cannot assign through index of %s", typeStr(bt)))
+		return TUnknown
 	}
 	s.errAt(tgt, "invalid assignment target")
 	return TUnknown
@@ -1613,9 +1843,6 @@ func (s *Sema) checkLValue(tgt any, scope *Scope) Type {
 
 // ---------- expressions ----------
 
-// infer records the type sema computes for each source expression,
-// keyed by the node's (line, col). Downstream consumers (the lowerer)
-// read this table to attach type info to IR nodes.
 func (s *Sema) infer(e any, scope *Scope) Type {
 	ty := s.inferRaw(e, scope)
 	if ty != nil && !isUnknown(ty) {
@@ -1626,7 +1853,6 @@ func (s *Sema) infer(e any, scope *Scope) Type {
 	return ty
 }
 
-// inferRaw is the actual dispatcher.
 func (s *Sema) inferRaw(e any, scope *Scope) Type {
 	if e == nil {
 		return TUnknown
@@ -1636,61 +1862,61 @@ func (s *Sema) inferRaw(e any, scope *Scope) Type {
 		return TUnknown
 	}
 	switch n[0].(string) {
-		case "IntExpr":
-			return Type{"int_const", n[1].(int)}
-		case "FloatExpr":
-			return TFloat
-		case "ByteExpr":
-			return TByte
-		case "StrExpr":
-			return TString
-		case "BoolExpr":
-			return TBool
-		case "NilExpr":
-			return TNil
-		case "IdentExpr":
-			return s.inferIdent(n, e, scope)
-		case "UnaryExpr":
-			return s.inferUnary(n, e, scope)
-		case "BinaryExpr":
-			return s.inferBinary(n, e, scope)
-		case "CallExpr":
-			return s.inferCall(n, e, scope)
-		case "SelectorExpr":
-			return s.inferSelector(n, e, scope)
-		case "IndexExpr":
-			return s.inferIndex(n, e, scope)
-		case "SliceExpr":
-			return s.inferSlice(n, e, scope)
-		case "StructLitExpr":
-			return s.inferStructLit(n, e, scope)
-		case "ListLitExpr":
-			return s.inferListLit(n, e, scope)
-		case "SetLitExpr":
-			return s.inferSetLit(n, e, scope)
-		case "MapLitExpr":
-			return s.inferMapLit(n, e, scope)
-		case "ListCompExpr", "SetCompExpr":
-			return s.inferComp(n, e, scope)
-		case "PostfixExpr":
-			t := s.infer(n[2], scope)
-			if isUnknown(t) {
-				return TUnknown
-			}
-			if !isNumeric(t) {
-				s.errAt(e, fmt.Sprintf("operator %q requires numeric, got %s",
-					n[1].(string), typeStr(t)))
-			}
-			return t
-		case "SpreadExpr":
-			s.errAt(e, "spread '...' is only valid in call arguments")
+	case "IntExpr":
+		return Type{"int_const", n[1].(int)}
+	case "FloatExpr":
+		return TFloat
+	case "ByteExpr":
+		return TByte
+	case "StrExpr":
+		return TString
+	case "BoolExpr":
+		return TBool
+	case "NilExpr":
+		return TNil
+	case "IdentExpr":
+		return s.inferIdent(n, e, scope)
+	case "UnaryExpr":
+		return s.inferUnary(n, e, scope)
+	case "BinaryExpr":
+		return s.inferBinary(n, e, scope)
+	case "CallExpr":
+		return s.inferCall(n, e, scope)
+	case "SelectorExpr":
+		return s.inferSelector(n, e, scope)
+	case "IndexExpr":
+		return s.inferIndex(n, e, scope)
+	case "SliceExpr":
+		return s.inferSlice(n, e, scope)
+	case "StructLitExpr":
+		return s.inferStructLit(n, e, scope)
+	case "ListLitExpr":
+		return s.inferListLit(n, e, scope)
+	case "SetLitExpr":
+		return s.inferSetLit(n, e, scope)
+	case "MapLitExpr":
+		return s.inferMapLit(n, e, scope)
+	case "ListCompExpr", "SetCompExpr":
+		return s.inferComp(n, e, scope)
+	case "PostfixExpr":
+		t := s.infer(n[2], scope)
+		if isUnknown(t) {
 			return TUnknown
-		case "FnLitExpr":
-			return s.inferFnLit(n, e, scope)
-		case "MatchExpr":
-			return s.inferMatch(n, e, scope)
-		case "RangeLitExpr":
-			return s.inferRangeLit(n, e, scope)
+		}
+		if !isNumeric(t) {
+			s.errAt(e, fmt.Sprintf("operator %q requires numeric, got %s",
+				n[1].(string), typeStr(t)))
+		}
+		return t
+	case "SpreadExpr":
+		s.errAt(e, "spread '...' is only valid in call arguments")
+		return TUnknown
+	case "FnLitExpr":
+		return s.inferFnLit(n, e, scope)
+	case "MatchExpr":
+		return s.inferMatch(n, e, scope)
+	case "RangeLitExpr":
+		return s.inferRangeLit(n, e, scope)
 	}
 	s.errAt(e, fmt.Sprintf("unknown expression %q", n[0].(string)))
 	return TUnknown
@@ -1728,32 +1954,32 @@ func (s *Sema) inferUnary(n []any, at any, scope *Scope) Type {
 		return TUnknown
 	}
 	switch op {
-		case "-":
-			if !isNumeric(t) {
-				s.errAt(at, fmt.Sprintf("unary '-' expects numeric, got %s", typeStr(t)))
-				return TUnknown
-			}
-			if isKind(t, "int_const") {
-				return Type{"int_const", -t[1].(int)}
-			}
-			return t
-		case "!":
-			if !typesEqual(t, TBool) {
-				s.errAt(at, fmt.Sprintf("unary '!' expects bool, got %s", typeStr(t)))
-			}
-			return TBool
-		case "&":
-			if !isAssignable(n[2]) && !isStructLit(n[2]) {
-				s.errAt(at, "cannot take address of a non-l-value")
-				return TUnknown
-			}
-			return Type{"ptr", t}
-		case "*":
-			if !isKind(t, "ptr") {
-				s.errAt(at, fmt.Sprintf("cannot dereference %s", typeStr(t)))
-				return TUnknown
-			}
-			return t[1].(Type)
+	case "-":
+		if !isNumeric(t) {
+			s.errAt(at, fmt.Sprintf("unary '-' expects numeric, got %s", typeStr(t)))
+			return TUnknown
+		}
+		if isKind(t, "int_const") {
+			return Type{"int_const", -t[1].(int)}
+		}
+		return t
+	case "!":
+		if !typesEqual(t, TBool) {
+			s.errAt(at, fmt.Sprintf("unary '!' expects bool, got %s", typeStr(t)))
+		}
+		return TBool
+	case "&":
+		if !isAssignable(n[2]) && !isStructLit(n[2]) {
+			s.errAt(at, "cannot take address of a non-l-value")
+			return TUnknown
+		}
+		return Type{"ptr", t}
+	case "*":
+		if !isKind(t, "ptr") {
+			s.errAt(at, fmt.Sprintf("cannot dereference %s", typeStr(t)))
+			return TUnknown
+		}
+		return t[1].(Type)
 	}
 	s.errAt(at, fmt.Sprintf("unknown unary operator %q", op))
 	return TUnknown
@@ -1765,8 +1991,8 @@ func isAssignable(e any) bool {
 		return false
 	}
 	switch n[0].(string) {
-		case "IdentExpr", "SelectorExpr", "IndexExpr":
-			return true
+	case "IdentExpr", "SelectorExpr", "IndexExpr":
+		return true
 	}
 	return false
 }
@@ -1776,14 +2002,16 @@ func isStructLit(e any) bool {
 	return ok && len(n) > 0 && n[0].(string) == "StructLitExpr"
 }
 
-// assignable reports whether a value of type `from` can go into a
-// slot of type `to`.
 func (s *Sema) assignable(from, to Type) bool {
 	if typesEqual(from, to) {
 		return true
 	}
 	if isKind(to, "interface") && s.implements(from, to) {
 		return true
+	}
+	// *struct → struct (auto-deref)
+	if isKind(from, "ptr") && !isKind(to, "ptr") {
+		return typesEqual(from[1].(Type), to)
 	}
 	return false
 }
@@ -1813,12 +2041,12 @@ func (s *Sema) implements(from, to Type) bool {
 
 	var structName string
 	switch {
-		case isKind(from, "struct"):
-			structName = from[1].(string)
-		case isKind(from, "ptr") && isKind(from[1].(Type), "struct"):
-			structName = from[1].(Type)[1].(string)
-		default:
-			return false
+	case isKind(from, "struct"):
+		structName = from[1].(string)
+	case isKind(from, "ptr") && isKind(from[1].(Type), "struct"):
+		structName = from[1].(Type)[1].(string)
+	default:
+		return false
 	}
 	info := s.Structs[structName]
 	if info == nil {
@@ -1851,54 +2079,54 @@ func (s *Sema) inferBinary(n []any, at any, scope *Scope) Type {
 	}
 
 	switch op {
-		case "+", "-", "*", "/":
-			if op == "+" && typesEqual(lt, TString) && typesEqual(rt, TString) {
-				return TString
+	case "+", "-", "*", "/":
+		if op == "+" && typesEqual(lt, TString) && typesEqual(rt, TString) {
+			return TString
+		}
+		if isNumeric(lt) && isNumeric(rt) {
+			if typesEqual(lt, TFloat) || typesEqual(rt, TFloat) {
+				return TFloat
 			}
-			if isNumeric(lt) && isNumeric(rt) {
-				if typesEqual(lt, TFloat) || typesEqual(rt, TFloat) {
-					return TFloat
-				}
-				return TInt
-			}
-			s.errAt(at, fmt.Sprintf("operator %q not defined for %s and %s",
-				op, typeStr(lt), typeStr(rt)))
-			return TUnknown
+			return TInt
+		}
+		s.errAt(at, fmt.Sprintf("operator %q not defined for %s and %s",
+			op, typeStr(lt), typeStr(rt)))
+		return TUnknown
 
-		case "%":
-			if isIntegerLike(lt) && isIntegerLike(rt) {
-				return TInt
-			}
-			s.errAt(at, fmt.Sprintf("operator '%%' requires ints, got %s, %s",
+	case "%":
+		if isIntegerLike(lt) && isIntegerLike(rt) {
+			return TInt
+		}
+		s.errAt(at, fmt.Sprintf("operator '%%' requires ints, got %s, %s",
+			typeStr(lt), typeStr(rt)))
+		return TUnknown
+
+	case "<", ">", "<=", ">=":
+		if (isNumeric(lt) && isNumeric(rt)) ||
+			(typesEqual(lt, TString) && typesEqual(rt, TString)) ||
+			(isIntegerLike(lt) && isIntegerLike(rt)) {
+			return TBool
+		}
+		s.errAt(at, fmt.Sprintf("operator %q requires matching numeric or string operands", op))
+		return TBool
+
+	case "==", "!=":
+		if !(typesEqual(lt, rt) || (isIntegerLike(lt) && isIntegerLike(rt))) {
+			s.errAt(at, fmt.Sprintf("cannot compare %s with %s",
 				typeStr(lt), typeStr(rt)))
-			return TUnknown
+		}
+		return TBool
 
-		case "<", ">", "<=", ">=":
-			if (isNumeric(lt) && isNumeric(rt)) ||
-				(typesEqual(lt, TString) && typesEqual(rt, TString)) ||
-				(isIntegerLike(lt) && isIntegerLike(rt)) {
-				return TBool
-			}
-			s.errAt(at, fmt.Sprintf("operator %q requires matching numeric or string operands", op))
-			return TBool
-
-		case "==", "!=":
-			if !(typesEqual(lt, rt) || (isIntegerLike(lt) && isIntegerLike(rt))) {
-				s.errAt(at, fmt.Sprintf("cannot compare %s with %s",
-					typeStr(lt), typeStr(rt)))
-			}
-			return TBool
-
-		case "&&", "||":
-			if !typesEqual(lt, TBool) {
-				s.errAt(at, fmt.Sprintf("%q expects bool on left, got %s",
-					op, typeStr(lt)))
-			}
-			if !typesEqual(rt, TBool) {
-				s.errAt(at, fmt.Sprintf("%q expects bool on right, got %s",
-					op, typeStr(rt)))
-			}
-			return TBool
+	case "&&", "||":
+		if !typesEqual(lt, TBool) {
+			s.errAt(at, fmt.Sprintf("%q expects bool on left, got %s",
+				op, typeStr(lt)))
+		}
+		if !typesEqual(rt, TBool) {
+			s.errAt(at, fmt.Sprintf("%q expects bool on right, got %s",
+				op, typeStr(rt)))
+		}
+		return TBool
 	}
 	s.errAt(at, fmt.Sprintf("unknown operator %q", op))
 	return TUnknown
@@ -2007,9 +2235,6 @@ func (s *Sema) inferCall(n []any, at any, scope *Scope) Type {
 	return ret
 }
 
-// inferMake handles make(T[, len]). The first argument must be a
-// string literal naming a type. Returns a pointer for struct types,
-// or the allocated container type otherwise.
 func (s *Sema) inferMake(at any, args []any, scope *Scope) Type {
 	if len(args) == 0 {
 		s.errAtCode(at, "S_MAKE_ARGS", "make: missing type name")
@@ -2023,8 +2248,6 @@ func (s *Sema) inferMake(at any, args []any, scope *Scope) Type {
 	}
 	typeName := nameNode[1].(string)
 
-	// Zero-arg form: make("Data"), make("[]int"), make("map[K]V").
-	// Length form: make("[]int", n).
 	if len(args) >= 2 {
 		lt := s.infer(args[1], scope)
 		if !typesEqual(lt, TInt) {
@@ -2039,18 +2262,14 @@ func (s *Sema) inferMake(at any, args []any, scope *Scope) Type {
 	}
 
 	switch {
-		case isKind(ty, "struct"):
-			// make("Data") — pointer to a fresh zero-valued struct.
-			return Type{"ptr", ty}
-
-		case isKind(ty, "list"),
-			isKind(ty, "set"),
-			isKind(ty, "map"):
-			return ty
-
-		case isKind(ty, "ptr"):
-			// make("*Data") is unusual but harmless — same as nil.
-			return ty
+	case isKind(ty, "struct"):
+		return Type{"ptr", ty}
+	case isKind(ty, "list"),
+		isKind(ty, "set"),
+		isKind(ty, "map"):
+		return ty
+	case isKind(ty, "ptr"):
+		return ty
 	}
 
 	s.errAtCode(at, "S_MAKE_TYPE",
@@ -2058,35 +2277,24 @@ func (s *Sema) inferMake(at any, args []any, scope *Scope) Type {
 	return TUnknown
 }
 
-// parseTypeName converts a runtime type-name string into a sema Type.
-// Handles the string forms that typeNodeName produces:
-//
-//	"int"            TInt
-//	"[]T"            list of T
-//	"{}T"            set of T
-//	"map[K]V"        map from K to V
-//	"*T"             pointer to T
-//	"Data"           struct Data, if declared
-//
-// Returns nil and reports an error if the name is unknown or malformed.
 func (s *Sema) parseTypeName(name string, at any) Type {
 	name = strings.TrimSpace(name)
 
 	switch name {
-		case "int":
-			return TInt
-		case "float":
-			return TFloat
-		case "string":
-			return TString
-		case "byte":
-			return TByte
-		case "bool":
-			return TBool
-		case "any":
-			return TAny
-		case "error":
-			return TError
+	case "int":
+		return TInt
+	case "float":
+		return TFloat
+	case "string":
+		return TString
+	case "byte":
+		return TByte
+	case "bool":
+		return TBool
+	case "any":
+		return TAny
+	case "error":
+		return TError
 	}
 
 	if strings.HasPrefix(name, "*") {
@@ -2149,83 +2357,97 @@ func (s *Sema) inferSelector(n []any, at any, scope *Scope) Type {
 	if isKind(bt, "ptr") {
 		bt = bt[1].(Type)
 	}
-	switch {
-		case isKind(bt, "package"):
-			pkg := bt[1].(string)
-			members := BuiltinPackages[pkg]
-			if t, ok := members[name]; ok {
-				return t
-			}
-			cands := make([]string, 0, len(members))
-			for k := range members {
-				cands = append(cands, k)
-			}
-			if sug := suggest(name, cands); sug != "" {
-				s.errAtCodeFix(at, "S_NO_MEMBER",
-					fmt.Sprintf("package %q has no member %q", pkg, name),
-					fmt.Sprintf("Did you mean %q?", sug))
-			} else {
-				s.errAtCode(at, "S_NO_MEMBER",
-					fmt.Sprintf("package %q has no member %q", pkg, name))
-			}
-			s.unknownReported = true
-			return TUnknown
 
-		case isKind(bt, "struct"):
-			sname := bt[1].(string)
-			info := s.Structs[sname]
-			if info == nil {
-				s.errAt(at, fmt.Sprintf("unknown struct %q", sname))
-				return TUnknown
-			}
-			if t, ok := info.Fields[name]; ok {
-				return t
-			}
+	// ★ Lưu type tại vị trí của field/method name để hover hoạt động.
+	recordName := func(ty Type) {
+		if ns := nodeNames(at); len(ns) > 0 {
+			s.recordType(ns[0][0], ns[0][1], ty)
+		}
+	}
+
+	switch {
+	case isKind(bt, "package"):
+		pkg := bt[1].(string)
+		members := BuiltinPackages[pkg]
+		if t, ok := members[name]; ok {
+			recordName(t)
+			return t
+		}
+		cands := make([]string, 0, len(members))
+		for k := range members {
+			cands = append(cands, k)
+		}
+		if sug := suggest(name, cands); sug != "" {
+			s.errAtCodeFix(at, "S_NO_MEMBER",
+				fmt.Sprintf("package %q has no member %q", pkg, name),
+				fmt.Sprintf("Did you mean %q?", sug))
+		} else {
+			s.errAtCode(at, "S_NO_MEMBER",
+				fmt.Sprintf("package %q has no member %q", pkg, name))
+		}
+		s.unknownReported = true
+		return TUnknown
+
+	case isKind(bt, "struct"):
+		sname := bt[1].(string)
+		info := s.Structs[sname]
+		if info == nil {
+			s.errAt(at, fmt.Sprintf("unknown struct %q", sname))
+			return TUnknown
+		}
+		if t, ok := info.Fields[name]; ok {
+			recordName(t)
+			return t
+		}
+		if sig, ok := info.Methods[name]; ok {
+			ty := sig.Type()
+			recordName(ty)
+			return ty
+		}
+		cands := make([]string, 0, len(info.Fields)+len(info.Methods))
+		for f := range info.Fields {
+			cands = append(cands, f)
+		}
+		for m := range info.Methods {
+			cands = append(cands, m)
+		}
+		if sug := suggest(name, cands); sug != "" {
+			s.errAtCodeFix(at, "S_NO_MEMBER",
+				fmt.Sprintf("%s has no field or method %q", sname, name),
+				fmt.Sprintf("Did you mean %q?", sug))
+		} else {
+			s.errAtCode(at, "S_NO_MEMBER",
+				fmt.Sprintf("%s has no field or method %q", sname, name))
+		}
+		s.unknownReported = true
+		return TUnknown
+
+	case isKind(bt, "interface"):
+		sname := bt[1].(string)
+		info := s.Interfaces[sname]
+		if info != nil {
 			if sig, ok := info.Methods[name]; ok {
-				return sig.Type()
+				ty := sig.Type()
+				recordName(ty)
+				return ty
 			}
-			cands := make([]string, 0, len(info.Fields)+len(info.Methods))
-			for f := range info.Fields {
-				cands = append(cands, f)
-			}
+		}
+		cands := []string{}
+		if info != nil {
 			for m := range info.Methods {
 				cands = append(cands, m)
 			}
-			if sug := suggest(name, cands); sug != "" {
-				s.errAtCodeFix(at, "S_NO_MEMBER",
-					fmt.Sprintf("%s has no field or method %q", sname, name),
-					fmt.Sprintf("Did you mean %q?", sug))
-			} else {
-				s.errAtCode(at, "S_NO_MEMBER",
-					fmt.Sprintf("%s has no field or method %q", sname, name))
-			}
-			s.unknownReported = true
-			return TUnknown
-
-		case isKind(bt, "interface"):
-			sname := bt[1].(string)
-			info := s.Interfaces[sname]
-			if info != nil {
-				if sig, ok := info.Methods[name]; ok {
-					return sig.Type()
-				}
-			}
-			cands := []string{}
-			if info != nil {
-				for m := range info.Methods {
-					cands = append(cands, m)
-				}
-			}
-			if sug := suggest(name, cands); sug != "" {
-				s.errAtCodeFix(at, "S_NO_MEMBER",
-					fmt.Sprintf("interface %s has no method %q", sname, name),
-					fmt.Sprintf("Did you mean %q?", sug))
-			} else {
-				s.errAtCode(at, "S_NO_MEMBER",
-					fmt.Sprintf("interface %s has no method %q", sname, name))
-			}
-			s.unknownReported = true
-			return TUnknown
+		}
+		if sug := suggest(name, cands); sug != "" {
+			s.errAtCodeFix(at, "S_NO_MEMBER",
+				fmt.Sprintf("interface %s has no method %q", sname, name),
+				fmt.Sprintf("Did you mean %q?", sug))
+		} else {
+			s.errAtCode(at, "S_NO_MEMBER",
+				fmt.Sprintf("interface %s has no method %q", sname, name))
+		}
+		s.unknownReported = true
+		return TUnknown
 	}
 	s.errAt(at, fmt.Sprintf("cannot select %q on %s", name, typeStr(bt)))
 	return TUnknown
@@ -2412,12 +2634,12 @@ func literalKey(e any) string {
 		return ""
 	}
 	switch n[0].(string) {
-		case "IntExpr", "ByteExpr":
-			return fmt.Sprintf("i:%v", n[1])
-		case "StrExpr":
-			return fmt.Sprintf("s:%v", n[1])
-		case "BoolExpr":
-			return fmt.Sprintf("b:%v", n[1])
+	case "IntExpr", "ByteExpr":
+		return fmt.Sprintf("i:%v", n[1])
+	case "StrExpr":
+		return fmt.Sprintf("s:%v", n[1])
+	case "BoolExpr":
+		return fmt.Sprintf("b:%v", n[1])
 	}
 	return ""
 }
@@ -2536,6 +2758,9 @@ func (s *Sema) inferFnLit(n []any, at any, scope *Scope) Type {
 		}); prev != nil {
 			s.errAt(p, fmt.Sprintf("%q redeclared in this scope", pname))
 		}
+		if pn, ok := pp[4].([][2]int); ok && len(pn) > 0 {
+			s.recordType(pn[0][0], pn[0][1], pty)
+		}
 	}
 
 	savedRet := s.CurrentRet
@@ -2556,14 +2781,14 @@ func (s *Sema) inferFnLit(n []any, at any, scope *Scope) Type {
 
 func (s *Sema) litType(v any) Type {
 	switch x := v.(type) {
-		case bool:
-			return TBool
-		case float64:
-			return TFloat
-		case string:
-			return TString
-		case int:
-			return Type{"int_const", x}
+	case bool:
+		return TBool
+	case float64:
+		return TFloat
+	case string:
+		return TString
+	case int:
+		return Type{"int_const", x}
 	}
 	return TUnknown
 }
@@ -2572,48 +2797,48 @@ func (s *Sema) compareLit(a, b any) (int, bool) {
 	if af, aok := toFloat(a); aok {
 		if bf, bok := toFloat(b); bok {
 			switch {
-				case af < bf:
-					return -1, true
-				case af > bf:
-					return 1, true
-				default:
-					return 0, true
+			case af < bf:
+				return -1, true
+			case af > bf:
+				return 1, true
+			default:
+				return 0, true
 			}
 		}
 	}
 	switch av := a.(type) {
-		case string:
-			if bv, ok := b.(string); ok {
-				switch {
-					case av < bv:
-						return -1, true
-					case av > bv:
-						return 1, true
-					default:
-						return 0, true
-				}
+	case string:
+		if bv, ok := b.(string); ok {
+			switch {
+			case av < bv:
+				return -1, true
+			case av > bv:
+				return 1, true
+			default:
+				return 0, true
 			}
-		case bool:
-			if bv, ok := b.(bool); ok {
-				switch {
-					case !av && bv:
-						return -1, true
-					case av && !bv:
-						return 1, true
-					default:
-						return 0, true
-				}
+		}
+	case bool:
+		if bv, ok := b.(bool); ok {
+			switch {
+			case !av && bv:
+				return -1, true
+			case av && !bv:
+				return 1, true
+			default:
+				return 0, true
 			}
+		}
 	}
 	return 0, false
 }
 
 func toFloat(v any) (float64, bool) {
 	switch x := v.(type) {
-		case int:
-			return float64(x), true
-		case float64:
-			return x, true
+	case int:
+		return float64(x), true
+	case float64:
+		return x, true
 	}
 	return 0, false
 }
@@ -2638,36 +2863,36 @@ func (s *Sema) inferMatch(n []any, at any, scope *Scope) Type {
 		body := arm[2]
 
 		switch pat[0].(string) {
-			case "WildcardPattern":
-				if seenWildcard {
-					s.errAt(pat, "duplicate wildcard pattern in match")
-				}
-				seenWildcard = true
-				seen = append(seen, patternInterval{hasWildcard: true})
+		case "WildcardPattern":
+			if seenWildcard {
+				s.errAt(pat, "duplicate wildcard pattern in match")
+			}
+			seenWildcard = true
+			seen = append(seen, patternInterval{hasWildcard: true})
 
-			case "LitPattern":
-				lt := s.litType(pat[1])
-				if !typesEqual(lt, st) {
-					s.errAt(pat, fmt.Sprintf(
-						"match pattern type %s does not fit scrutinee type %s",
-						typeStr(lt), typeStr(st)))
-				}
-				seen = s.checkOverlap(seen, pat, pat[1], pat[1], false)
+		case "LitPattern":
+			lt := s.litType(pat[1])
+			if !typesEqual(lt, st) {
+				s.errAt(pat, fmt.Sprintf(
+					"match pattern type %s does not fit scrutinee type %s",
+					typeStr(lt), typeStr(st)))
+			}
+			seen = s.checkOverlap(seen, pat, pat[1], pat[1], false)
 
-			case "RangePattern":
-				lt := s.litType(pat[1])
-				ht := s.litType(pat[2])
-				if !typesEqual(lt, st) || !typesEqual(ht, st) {
-					s.errAt(pat, fmt.Sprintf(
-						"match range pattern types (%s..%s) do not fit scrutinee type %s",
-						typeStr(lt), typeStr(ht), typeStr(st)))
-				}
-				if cmp, ok := s.compareLit(pat[1], pat[2]); ok && cmp > 0 {
-					s.errAt(pat, fmt.Sprintf(
-						"match range pattern lower bound %v exceeds upper bound %v",
-						pat[1], pat[2]))
-				}
-				seen = s.checkOverlap(seen, pat, pat[1], pat[2], true)
+		case "RangePattern":
+			lt := s.litType(pat[1])
+			ht := s.litType(pat[2])
+			if !typesEqual(lt, st) || !typesEqual(ht, st) {
+				s.errAt(pat, fmt.Sprintf(
+					"match range pattern types (%s..%s) do not fit scrutinee type %s",
+					typeStr(lt), typeStr(ht), typeStr(st)))
+			}
+			if cmp, ok := s.compareLit(pat[1], pat[2]); ok && cmp > 0 {
+				s.errAt(pat, fmt.Sprintf(
+					"match range pattern lower bound %v exceeds upper bound %v",
+					pat[1], pat[2]))
+			}
+			seen = s.checkOverlap(seen, pat, pat[1], pat[2], true)
 		}
 
 		if bn, ok := body.([]any); ok && len(bn) > 0 && bn[0].(string) == "Block" {
@@ -2712,7 +2937,6 @@ func (s *Sema) checkOverlap(seen []patternInterval, pat any, lo, hi any, isRange
 
 // ---------- suggestions ----------
 
-// levenshtein computes the edit distance between two strings.
 func levenshtein(a, b string) int {
 	if a == "" {
 		return len(b)
@@ -2752,11 +2976,6 @@ func min3(a, b, c int) int {
 	return c
 }
 
-// suggest returns the closest candidate to name, or "" if nothing is
-// within the edit-distance threshold. Comparison is case-insensitive.
-//
-// Threshold grows with the input length so short names need exact or
-// near-exact matches, while long names tolerate a couple of typos.
 func suggest(name string, candidates []string) string {
 	threshold := len(name) / 3
 	if threshold < 1 {
@@ -2779,4 +2998,41 @@ func suggest(name string, candidates []string) string {
 		}
 	}
 	return best
+}
+
+func (s *Sema) LocalType(fnDecl []any, name string) Type {
+	if s == nil || len(fnDecl) < 6 {
+		return nil
+	}
+	body, ok := fnDecl[5].([]any)
+	if !ok || len(body) < 2 {
+		return nil
+	}
+	stmts, ok := body[1].([]any)
+	if !ok {
+		return nil
+	}
+	for _, st := range stmts {
+		stm, ok := st.([]any)
+		if !ok || len(stm) < 4 {
+			continue
+		}
+		if stm[0].(string) != "LetStmt" {
+			continue
+		}
+		names, ok := stm[1].([]string)
+		if !ok || len(names) != 1 || names[0] != name {
+			continue
+		}
+		expr := stm[3]
+		if expr == nil {
+			return nil
+		}
+		return s.TypeOf(expr)
+	}
+	return nil
+}
+
+func IsVoid(t Type) bool {
+	return len(t) == 1 && t[0] == "void"
 }

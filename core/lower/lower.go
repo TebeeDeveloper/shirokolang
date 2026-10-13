@@ -93,6 +93,13 @@ func (l *Lowerer) lowerDecl(d any) any {
 			return []any{"GlobalLet", n[1], n[2], l.lowerExpr(n[3])}
 		case "TopConst":
 			return []any{"GlobalLet", []string{n[1].(string)}, nil, l.lowerExpr(n[2])}
+		case "TopStmt":
+			stmts := n[1].([]any)
+			var out []any
+			for _, s := range stmts {
+				out = append(out, l.lowerStmt(s)...)
+			}
+			return []any{"TopStmt", out}
 	}
 	l.err(fmt.Sprintf("unknown decl %q", n[0].(string)))
 	return nil
@@ -427,7 +434,7 @@ func (l *Lowerer) lowerComp(comp []any, target string, declare bool) []any {
 			l.err("`int+` comprehension needs a stop condition (`; cond`)")
 			return nil
 		}
-		stmts = append(stmts, []any{"HLet", varName, nil, []any{"HInt", 1}})
+		stmts = append(stmts, []any{"HLet", varName, nil, []any{"HInt", 0}})
 
 		inner := l.compAppendStmt(target, elem, isSet)
 		if filt != nil {
