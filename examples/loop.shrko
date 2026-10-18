@@ -1,0 +1,15 @@
+package main
+
+import {
+  "std/fmt"
+}
+
+func main() {
+  for range 5 {}
+
+  for i = 0, i < 5, i++ {}
+
+  let ds = []int{1, 2, 3}
+  for d = iter ds {}
+  for i, d = iter ds {}
+}
