@@ -1,0 +1,16 @@
+# shiropkgs.shiropkgs
+#
+# Package registry for this shirocc build.
+# One import path per line. Blank lines and # comments are ignored.
+#
+# `shirocc import` (run from a project root) appends the project's
+# name to this file and copies the project's source into libs/<name>/.
+#
+# The REPL and file mode both resolve imports from libs/.
+
+std/fmt
+std/strings
+std/strconv
+std/os
+std/math
+std/sort
