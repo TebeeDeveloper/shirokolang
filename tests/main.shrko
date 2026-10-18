@@ -1,7 +1,0 @@
-package main
-import {
-  "std/fmt"
-}
-func main() {
-  fmt.println("Hello, ShirokoLang!")
-}
