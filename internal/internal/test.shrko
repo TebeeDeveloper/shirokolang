@@ -1,0 +1,12 @@
+// how
+
+fn fib(n int) -> int {
+	if n <= 1 {
+		return n
+	}
+	return fib(n - 1) + fib(n - 2)
+}
+
+let x = fib(30)
+use fmt
+fmt.println("fib(30) = {}", x)
