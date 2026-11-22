@@ -1,0 +1,101 @@
+# luu y: code su dung o terminal khong co ibus-unikey
+
+# day la comment
+
+# tao mot ham
+
+fn add(a i32, b i32) -> i32 {
+	return a + b
+}
+
+let x = add(1, 5)
+
+# nap module (ko phai builtin, ko hardcode)
+
+use fmt
+
+# if-else
+
+if x <= 3 {
+	fmt.println("Qua nho")
+} else if x > 3 && x < 5 {
+	fmt.println("Trung binh")
+} else {
+	fmt.println("Qua lon")
+}
+
+# for
+
+for x < 200 {
+	x++
+}
+
+for let i = 0; i < 40; i++ {
+	fmt.println("i = {}", i)
+}
+
+
+# danh sach
+
+let data = []int{1, 2, 3, 4, 5}
+
+for let d : data {
+	fmt.println("{}", d)
+}
+
+# closure (capture by reference)
+
+let base = 10
+
+let f = fn(x int) -> int {
+	return x + base
+}
+
+base = 30
+
+let a = f(4) # a = 34
+
+# const
+
+const pi = 3.14
+
+pi = 5 # error
+
+# struct
+
+struct Point {
+	a int
+	b int
+}
+
+extend Point.get_point() -> (int, int) {
+	return self.a, self.b
+}
+
+let p = Point{a: 5, b: 10}
+
+let ma, mb = p.get_point()
+
+
+--p.a
+++p.a
+p.a++
+p.a--
+
+let N = a * b / c - d # ((a * b) / c) - d
+
+n %= 20 # += -= *= /=
+
+||
+!
+-
+
+let M = !(-N)
+
+let mylist = []int{1, 2, 3, 4, 5, 6}
+
+mylist.append(7)
+
+let q, w, e, r = 1, 2, 3, 4
+
+q, w = w, q
